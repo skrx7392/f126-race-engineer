@@ -27,7 +27,15 @@ Reversals welcome — flag anything and I'll adjust.
 7. **`f126` database + role created on the shared Postgres** (postgres namespace) with a
    generated password stored only as a k8s Secret in the new `f126` namespace; the role gets
    rights on its own database only (database owner, no superuser/createrole).
-8. **Shared-Postgres access detour (transparency):** the deployment's POSTGRES_USER/PASSWORD
+8. **Post-build review round (Opus reviewer, 15 findings, all addressed or accepted):**
+   fixed the raw_file off-by-one blocker + 11 hardening items (commit af3e9fc). Two
+   accepted-as-is: WS over-cap clients still get a polite accept-then-1013 close (the
+   flood concern is bounded by uvicorn limit_concurrency=64 instead — preserves the
+   client-visible backoff signal); /api/sessions/{id}'s per-hit sample counts stay
+   (trivial at our row counts, revisit if it ever shows in metrics). CI tests against
+   Postgres 18 (latest GA) while cluster runs 16.14 — accepted: schema floor is PG15
+   (NULLS NOT DISTINCT), verified working on 16.14 at deploy.
+9. **Shared-Postgres access detour (transparency):** the deployment's POSTGRES_USER/PASSWORD
    env values are stale — the data volume was initialized with different credentials. Actual
    roles: `<PG_SUPERUSER>` (superuser), `<PG_APP_ROLE>` (plain). No `postgres` role exists. To
    create the f126 role/db I briefly prepended `local all <PG_SUPERUSER> trust` to pg_hba.conf
