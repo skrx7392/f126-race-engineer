@@ -15,6 +15,7 @@ name: cd
 on:
   push:
     branches: [main]
+  workflow_dispatch: {}  # manual lever — added during the 2026-08-06 Actions outage
 
 # Minimal default scope. Write access is granted per-job, below.
 permissions:
