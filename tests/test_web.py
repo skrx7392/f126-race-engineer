@@ -429,12 +429,33 @@ async def test_limit_is_bounded() -> None:
         assert (await client.get("/api/sessions", params={"limit": 10_000})).status_code == 422
 
 
+def _walk_routes(routes: list[Any]) -> Any:
+    """Descend into included routers — FastAPI parks them as opaque entries in
+    app.routes, which silently exempted every /api route from this walk."""
+    for route in routes:
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            yield from _walk_routes(inner.routes)
+            continue
+        sub = getattr(route, "routes", None)
+        if sub:
+            yield from _walk_routes(sub)
+            continue
+        yield route
+
+
 def test_no_mutating_routes() -> None:
     """The project invariant: this app can only ever be read from."""
     app = create_app(make_cfg(), FakeLive(), {}, lambda: object())
-    for route in app.routes:
+    checked = 0
+    for route in _walk_routes(app.routes):
         methods = getattr(route, "methods", None) or set()
         assert methods <= {"GET", "HEAD"}, f"{route} exposes {methods}"
+        if methods:
+            checked += 1
+    # If the walk ever goes vacuous again (framework change), fail loudly rather
+    # than silently passing: the app has at least this many HTTP routes.
+    assert checked >= 6, f"route walk only found {checked} routes — walker is broken"
 
 
 async def test_mutating_requests_are_rejected(tmp_path: Path) -> None:
