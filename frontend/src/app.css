@@ -1,0 +1,251 @@
+/*
+ * Race Engineer — design tokens and global chrome.
+ *
+ * ── The colour position ──────────────────────────────────────────────────────
+ * Almost every colour this interface can spend is already claimed by an F1
+ * convention: purple/green/yellow rank a sector, red and yellow are flags,
+ * blue and red are tyre temperature. There is no wavelength left over for a
+ * decorative brand accent, and inventing one would compete with the data.
+ *
+ * So the accent is absence. Structure is rendered in graphite and grey ink;
+ * saturated colour appears only where it carries meaning. A calm screen is
+ * nearly monochrome, which is what makes an abnormal one register in the ~300 ms
+ * of attention a driver has mid-corner. Identity in the timing tower comes from
+ * real constructor colours — data, not decoration — and always beside the
+ * driver's name, never instead of it.
+ *
+ * Sector colours were re-stepped from the broadcast values, which fail a
+ * colourblind-separation check outright (green vs yellow at protan ΔE 5.6).
+ * These clear it at 15.6 while staying recognisable.
+ *
+ * ── The type rule ────────────────────────────────────────────────────────────
+ * Clocks are mono; gauges are sans.
+ *
+ * Time strings (lap, sector, gap, delta) are clock readings: monospace, so a
+ * column of them aligns digit-for-digit and the eye can compare rows without
+ * reading them. Magnitudes (speed, rpm, temperature, %) are gauge readings:
+ * the system sans at heavy weight with tabular figures, which is both larger
+ * per pixel and steadier at distance. The split also makes the two kinds of
+ * number separable at a glance, which is the whole job of the timing tower.
+ *
+ * Both faces are system stacks — nothing is fetched at runtime. On the actual
+ * targets (iPad, MacBook) that resolves to SF Pro and SF Mono.
+ */
+
+:root {
+  /* Surfaces — a cool graphite, lifted in three steps. */
+  --bg: #0b0c0e;
+  --surface-1: #131519;
+  --surface-2: #1b1e24;
+  --surface-3: #242832;
+  --line: #262b33;
+  --line-strong: #39404c;
+
+  /* Ink */
+  --ink: #f2f4f7;
+  --ink-2: #99a1ad;
+  --ink-3: #626b79;
+  --player: #ffffff;
+
+  /* Semantic colour. Validated against --bg: all ≥ 4.7:1. */
+  --purple: #a64dff; /* session best  */
+  --green: #16c464; /* personal best / gaining / good */
+  --yellow: #ffe500; /* improved but not best / yellow flag */
+  --red: #ff3b30; /* losing / hot / red flag / brake */
+  --blue: #3b9eff; /* cold tyre / blue flag */
+  --amber: #ff9f0a; /* warning / safety car */
+
+  /* Dimmed variants for fills that sit behind text. */
+  --purple-dim: #2a1544;
+  --green-dim: #0b3320;
+  --yellow-dim: #3a3406;
+  --red-dim: #3d1310;
+  --blue-dim: #0f2a45;
+  --amber-dim: #3a2504;
+
+  --font-display: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display',
+    'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Mono', 'Roboto Mono', Menlo,
+    Consolas, monospace;
+
+  --radius: 6px;
+  --radius-sm: 3px;
+  --gap: 0.5rem;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/*
+ * One root font-size drives the entire layout, so every panel scales together
+ * between a phone in landscape and a desktop. `min(vw, vh)` keeps the UI
+ * bounded by whichever axis is tighter — the design target, an iPad at
+ * 1180×820, lands at ~13.6px.
+ */
+html {
+  font-size: clamp(9px, min(1.15vw, 1.7vh), 18px);
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  line-height: 1.1;
+  /* A pit-wall display never scrolls; it is a fixed instrument panel. */
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* ── numerals ─────────────────────────────────────────────────────────────── */
+
+/* Clock readings: lap times, sectors, gaps, deltas. */
+.clock {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Gauge readings: speed, rpm, temperature, percentages. */
+.gauge {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+/* Instrument-panel legend. The only uppercase in the interface besides names. */
+.label {
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* ── panels ───────────────────────────────────────────────────────────────── */
+
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+/* ── semantic ink ─────────────────────────────────────────────────────────── */
+
+.is-purple {
+  color: var(--purple);
+}
+.is-green {
+  color: var(--green);
+}
+.is-yellow {
+  color: var(--yellow);
+}
+.is-red {
+  color: var(--red);
+}
+.is-blue {
+  color: var(--blue);
+}
+.is-amber {
+  color: var(--amber);
+}
+.is-muted {
+  color: var(--ink-3);
+}
+
+/* ── motion ───────────────────────────────────────────────────────────────── */
+
+@keyframes flag-sweep {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 3rem 0;
+  }
+}
+
+@keyframes flag-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes toast-in {
+  from {
+    transform: translateX(0.9rem);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes banner-throb {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
+/*
+ * Reduced motion: the tween helper snaps to target values in JS, and every
+ * decorative animation stops here. The data keeps updating — only the
+ * in-between frames go away.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Display-only surface: no text selection, no focus rings on non-interactives. */
+#app {
+  user-select: none;
+}

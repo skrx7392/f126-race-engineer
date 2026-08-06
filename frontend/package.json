@@ -1,0 +1,27 @@
+{
+  "name": "f126-race-engineer-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Live pit-wall dashboard for F1 25 career mode. Vite + Svelte 5 SPA, served by the f126 backend from frontend/dist.",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "vite --mode mock",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/svelte": "^5.4.2",
+    "@tsconfig/svelte": "^5.0.4",
+    "jsdom": "^30.0.1",
+    "svelte": "^5.56.8",
+    "svelte-check": "^4.7.4",
+    "typescript": "^5.9.0",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
+  }
+}
