@@ -74,11 +74,16 @@ async def _pump(
     state: Any,
     rawlog: RawLogWriter | None,
 ) -> None:
-    """The hot loop: raw-log first, parse second, feed state third."""
+    """The hot loop: raw-log first, parse second, feed state third.
+
+    The raw-log write runs in a worker thread because its periodic fsync would
+    otherwise stall the event loop (rawlog's own documented contract). Ordering
+    is preserved: this task awaits each write before taking the next datagram.
+    """
     while True:
         data, mono_ns, wall_ns = await queue.get()
         if rawlog is not None:
-            rawlog.write(data, mono_ns, wall_ns)
+            await asyncio.to_thread(rawlog.write, data, mono_ns, wall_ns)
         pkt = parser.parse(data, mono_ns, wall_ns)
         if pkt is not None:
             state.feed(pkt)
@@ -97,17 +102,19 @@ async def _ticker(
         await asyncio.sleep(interval_s)
         now_ns = time.monotonic_ns()
         state.tick(now_ns)
-        received = listener.received if listener is not None else last_received
+        if listener is not None:
+            current, drops = listener.received, listener.dropped
+        else:  # replay: no listener, count parsed packets instead
+            current, drops = parser.counters.get("parsed_total", 0), 0
         errors = parser.counters.get("errors_total", 0)
-        drops = listener.dropped if listener is not None else 0
         hub = hub_getter()
         state.live.update_health(
-            packets_per_sec=received - last_received,
+            packets_per_sec=current - last_received,
             parse_errors_total=errors,
             kernel_drops_total=drops,
             ws_clients=hub.client_count if hub is not None else 0,
         )
-        last_received = received
+        last_received = current
 
 
 def _make_writer(cfg: Config) -> DbWriter | None:
@@ -143,24 +150,63 @@ async def _serve_async(cfg: Config) -> int:
     rawlog = RawLogWriter(cfg.data_dir)
     writer = _make_writer(cfg)
     parser = PacketParser()
+
+    # Per-file capture bookkeeping: which session the current raw file records,
+    # and the counter baselines to compute per-file byte/packet totals from the
+    # writer's lifetime counters.
+    capture: dict[str, Any] = {"key": None, "bytes0": 0, "packets0": 0, "opened_wall": time.time()}
+
+    def _emit_capture_row(closed_path: str) -> None:
+        key = capture["key"]
+        if writer is None or key is None:
+            return
+        writer.enqueue(
+            "raw_captures",
+            {
+                "session_key_uid": key[0],
+                "segment": key[1],
+                "path": closed_path,
+                "bytes": rawlog.bytes_written - capture["bytes0"],
+                "packets": rawlog.packets_written - capture["packets0"],
+                "first_wall": capture["opened_wall"],
+                "last_wall": time.time(),
+                "packet_format": None,
+            },
+        )
+
+    def _on_rotate(uid: int, seg: int) -> str:
+        # rotate() returns the *finalized old* file; catalog it against the
+        # session that just ended, then hand the *new* file's final name to the
+        # state layer for `sessions.raw_file` (the contract build_state expects).
+        closed = rawlog.rotate(uid, seg)
+        _emit_capture_row(str(closed))
+        capture.update(
+            key=(str(uid), int(seg)),
+            bytes0=rawlog.bytes_written,
+            packets0=rawlog.packets_written,
+            opened_wall=time.time(),
+        )
+        return str(rawlog.final_path)
+
     state = build_state(
         cfg,
         emit_row=writer.enqueue if writer is not None else None,
-        on_rotate=lambda uid, seg: str(rawlog.rotate(uid, seg)),
+        on_rotate=_on_rotate,
     )
 
+    listener = await start_listener(cfg, queue)
     app = create_app(
         cfg,
         live=state.live,
         stats_sources={
-            "state": state.live,
+            "state": state,
+            "listener": listener,
             "parser": _parser_stats(parser),
             "rawlog": _rawlog_stats(rawlog),
             "writer": _writer_stats(writer) if writer is not None else None,
         },
         db_conn_factory=_db_conn_factory(cfg),
     )
-    listener = await start_listener(cfg, queue)
     log.info(
         "listening UDP %s:%d (rcvbuf %d), http %s:%d",
         cfg.udp_host,
@@ -196,14 +242,28 @@ async def _serve_async(cfg: Config) -> int:
             if t is not stopper and t.exception() is not None:
                 raise t.exception()  # noqa: RSE102 — re-raise task failure
     finally:
+        # Each step guarded: one failing cleanup (e.g. ENOSPC in rawlog.close)
+        # must never prevent the later ones — especially writer.stop, whose
+        # daemon thread would otherwise die with rows still queued.
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        listener.close()
-        state.shutdown()
-        rawlog.close()
+        with contextlib.suppress(Exception):
+            listener.close()
+        try:
+            state.shutdown()
+        except Exception:
+            log.exception("state shutdown failed")
+        try:
+            final_path = rawlog.close()
+            _emit_capture_row(str(final_path))
+        except Exception:
+            log.exception("raw log close failed")
         if writer is not None:
-            writer.stop(timeout=10.0)
+            try:
+                writer.stop(timeout=10.0)
+            except Exception:
+                log.exception("db writer stop failed")
     return 0
 
 
@@ -220,7 +280,7 @@ async def _replay_async(cfg: Config, path: str, speed: str, loop_playback: bool)
         cfg,
         live=state.live,
         stats_sources={
-            "state": state.live,
+            "state": state,
             "parser": _parser_stats(parser),
             "writer": _writer_stats(writer) if writer is not None else None,
         },
@@ -237,8 +297,16 @@ async def _replay_async(cfg: Config, path: str, speed: str, loop_playback: bool)
         "replaying %s at speed=%s — dashboard on http://localhost:%d", path, speed, cfg.http_port
     )
     try:
-        result = await replay(path, queue, speed=speed, loop=loop_playback)
-        while not queue.empty():
+        feeder = asyncio.create_task(
+            replay(path, queue, speed=speed, loop=loop_playback), name="feeder"
+        )
+        # Supervise: a dead pump would otherwise block the feeder forever on a
+        # full queue with its traceback swallowed.
+        done, _ = await asyncio.wait({feeder, pump}, return_when=asyncio.FIRST_COMPLETED)
+        if pump in done and pump.exception() is not None:
+            raise pump.exception()  # noqa: RSE102
+        result = await feeder
+        while not queue.empty() and not pump.done():
             await asyncio.sleep(0.05)
         log.info("replay done: %s packets", getattr(result, "packets_fed", "?"))
         # keep serving the dashboard until Ctrl-C so the session stays inspectable
@@ -281,8 +349,14 @@ async def _backfill_async(cfg: Config, paths: list[str]) -> int:
         queue: asyncio.Queue[QueueItem] = make_queue(maxsize=65536)
         pump = asyncio.create_task(_pump(queue, parser, state, None))
         try:
-            result = await replay(target, queue, speed="max")
-            while not queue.empty():
+            feeder = asyncio.create_task(replay(target, queue, speed="max"), name="feeder")
+            done, _ = await asyncio.wait({feeder, pump}, return_when=asyncio.FIRST_COMPLETED)
+            if pump in done and pump.exception() is not None:
+                feeder.cancel()
+                await asyncio.gather(feeder, return_exceptions=True)
+                raise pump.exception()  # noqa: RSE102
+            result = await feeder
+            while not queue.empty() and not pump.done():
                 await asyncio.sleep(0.05)
         finally:
             pump.cancel()

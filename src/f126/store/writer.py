@@ -487,8 +487,8 @@ class DbWriter:
             self._q_durable.put_nowait(marker)
         except queue.Full:  # pragma: no cover
             return False
-        marker.event.wait(timeout)
-        return self._state_connected
+        completed = marker.event.wait(timeout)
+        return completed and self._state_connected
 
     def stats(self) -> WriterStats:
         """Snapshot of writer health; cheap enough to call per HTTP request."""
@@ -524,7 +524,16 @@ class DbWriter:
                 marker.event.set()
             if stopping:
                 break
-        self._disconnect()
+        self._abandon_queued()
+        with self._lock:
+            retry_depth = len(self._retry)
+        if retry_depth:
+            log.warning(
+                "db writer stopping with %d durable rows unreplayed — "
+                "recover them with `f126 backfill`",
+                retry_depth,
+            )
+        self._disconnect(quiet=True)
 
     def _collect(self) -> tuple[Batch, list[_FlushMarker], bool]:
         """Accumulate rows for up to one batch window. Returns (batch, markers, stopping)."""
@@ -820,10 +829,22 @@ class DbWriter:
         self._next_attempt = time.monotonic() + self._backoff * (1.0 + random.random() * 0.1)
         self._backoff = min(self._backoff * 2.0, self._backoff_max)
 
-    def _disconnect(self) -> None:
+    def _abandon_queued(self) -> None:
+        """At stop: whatever is still queued is counted as dropped, not vanished."""
+        while True:
+            try:
+                item = self._q_sample.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(item, tuple):
+                self._count_drop(item[0], 1)
+            elif isinstance(item, _FlushMarker):
+                item.event.set()
+
+    def _disconnect(self, quiet: bool = False) -> None:
         self._forget_uncommitted()
         conn, self._conn = self._conn, None
-        self._set_connected(False)
+        self._set_connected(False, quiet=quiet)
         if conn is not None:
             with contextlib.suppress(Exception):  # closing an already-broken socket
                 conn.close()
@@ -881,10 +902,10 @@ class DbWriter:
         with self._lock:
             self._last_error = message
 
-    def _set_connected(self, value: bool) -> None:
+    def _set_connected(self, value: bool, quiet: bool = False) -> None:
         with self._lock:
             was, self._state_connected = self._state_connected, value
-        if was and not value:
+        if was and not value and not quiet:
             log.warning("db writer lost its connection; samples will be dropped until it returns")
 
 

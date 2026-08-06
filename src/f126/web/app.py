@@ -189,6 +189,7 @@ def create_app(
         lifespan=lifespan,
         docs_url=None,  # Swagger/ReDoc load from a CDN; our CSP blocks that.
         redoc_url=None,
+        openapi_url=None,  # internet-exposed surface: don't publish the route table
     )
     app.add_middleware(SecurityHeadersMiddleware)
     # The state layer mirrors client_count into `slow.health.ws_clients`, and the
@@ -366,6 +367,8 @@ def build_server(cfg: Config, app: ASGIApp) -> uvicorn.Server:
         lifespan="on",
         ws_ping_interval=20.0,  # prunes half-open sockets so the cap stays honest
         ws_ping_timeout=20.0,
+        ws_max_size=16 * 1024,  # server->client protocol; inbound frames are noise
+        limit_concurrency=64,  # internet-exposed: bound sockets, not just registered clients
         timeout_graceful_shutdown=5,
     )
     return _Server(config)

@@ -109,10 +109,16 @@ def laps_for_session(
     car_index: int | None = None,
     *,
     all_generations: bool = False,
+    limit: int = 5_000,
 ) -> list[JsonRow]:
-    """Laps ordered by car then lap; only the newest generation of each lap by default."""
+    """Laps ordered by car then lap; only the newest generation of each lap by default.
+
+    Bounded because this backs an unauthenticated endpoint; 5k covers every
+    car in the longest race weekend with two orders of magnitude to spare.
+    """
     sql = _LAPS_ALL_SQL if all_generations else _LAPS_LATEST_SQL
-    return _fetch(conn, sql, (session_id, car_index, car_index))
+    sql = f"{sql} LIMIT %s"
+    return _fetch(conn, sql, (session_id, car_index, car_index, max(1, int(limit))))
 
 
 def telemetry_for_lap(
