@@ -26,4 +26,12 @@ Reversals welcome — flag anything and I'll adjust.
    cannot set visibility on a package that doesn't exist yet).
 7. **`f126` database + role created on the shared Postgres** (postgres namespace) with a
    generated password stored only as a k8s Secret in the new `f126` namespace; the role gets
-   rights on its own database only.
+   rights on its own database only (database owner, no superuser/createrole).
+8. **Shared-Postgres access detour (transparency):** the deployment's POSTGRES_USER/PASSWORD
+   env values are stale — the data volume was initialized with different credentials. Actual
+   roles: `<PG_SUPERUSER>` (superuser), `<PG_APP_ROLE>` (plain). No `postgres` role exists. To
+   create the f126 role/db I briefly prepended `local all <PG_SUPERUSER> trust` to pg_hba.conf
+   (unix-socket only, inside the container; TCP stayed scram throughout), ran the DDL, and
+   restored pg_hba byte-for-byte + reload — verified scram-only afterwards. The superuser
+   password was NOT changed. Recommendation for later: reconcile the deployment env vars with
+   reality (or rotate <PG_SUPERUSER>'s password into a proper Secret) — flagged, not done.

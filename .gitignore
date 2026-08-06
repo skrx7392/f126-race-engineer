@@ -11,3 +11,4 @@ frontend/dist/
 .env
 .DS_Store
 data/
+.claude/

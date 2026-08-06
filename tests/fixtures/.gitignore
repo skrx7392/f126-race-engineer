@@ -1,0 +1,5 @@
+# Full live PS5 captures are too large to commit (10 MB / 25 MB).
+# Tests that use them skip when missing; see docs/spec-2026.md for how to
+# recapture. The ~1 MB trimmed fixture below IS committed.
+bahrain_p1_2026.cap
+bahrain_p1_60hz_2026.cap
