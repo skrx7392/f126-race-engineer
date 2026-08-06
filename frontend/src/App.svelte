@@ -1,113 +1,76 @@
 <script lang="ts">
   /**
-   * The shell: the persistent chrome, and the layout switch.
+   * The route switch, and nothing else.
    *
-   * Reading top to bottom, the screen is arranged by how far from the centre of
-   * vision each thing can still be understood:
+   * Two halves of one product live behind this file. `#/` is the live pit wall:
+   * a kiosk, no chrome, no navigation, exactly as it was before analysis
+   * existed. Everything else is the analysis side: a scroll container, a thin
+   * nav, and one page. They share the design tokens, the formatters and the
+   * WebSocket store, and share no layout at all — because a screen you glance at
+   * from 1.5 m and a screen you read numbers off are not the same screen.
    *
-   *   strip   — peripheral. Shift lights, or the flag colour.
-   *   header  — where, what, how long, and whether to trust the numbers.
-   *   banner  — the flag, in words, only when there is one.
-   *   body    — the session-specific instrument panel.
-   *
-   * The layout follows `slow.session.session_kind`, so switching sessions in
-   * game switches the dashboard with no interaction. Practice borrows the
-   * qualifying layout: both are single-lap sessions where the delta is the
-   * whole story.
+   * The pit wall is mounted only on its own route rather than hidden with CSS,
+   * so an analysis page never carries the cost of a live dashboard rendering
+   * behind it at 10 Hz.
    */
-  import { store } from './lib/ws.svelte';
-  import { flagState, safetyCarState } from './lib/enums';
-  import ShiftStrip from './components/ShiftStrip.svelte';
-  import Header from './components/Header.svelte';
-  import FlagBanner from './components/FlagBanner.svelte';
-  import Toasts from './components/Toasts.svelte';
-  import RaceLayout from './layouts/RaceLayout.svelte';
-  import QualiLayout from './layouts/QualiLayout.svelte';
-  import TimeTrialLayout from './layouts/TimeTrialLayout.svelte';
+  import { analysis } from './lib/analysis.svelte';
+  import { intParam, isAnalysisRoute, router } from './lib/router.svelte';
+  import PitWall from './layouts/PitWall.svelte';
+  import AnalysisNav from './components/AnalysisNav.svelte';
+  import SessionsPage from './routes/SessionsPage.svelte';
+  import SessionDetailPage from './routes/SessionDetailPage.svelte';
+  import ComparePage from './routes/ComparePage.svelte';
+  import CornersPage from './routes/CornersPage.svelte';
+  import StintsPage from './routes/StintsPage.svelte';
 
-  let session = $derived(store.slow?.session ?? store.session);
-  let kind = $derived(session?.session_kind ?? null);
+  $effect(() => router.start());
 
-  let flag = $derived(flagState(session?.fia_flag));
-  let safetyCar = $derived(safetyCarState(session?.safety_car));
+  let route = $derived(router.route);
 
-  let lapNumber = $derived(store.fast?.lap_number ?? store.playerRow?.lap_number ?? null);
+  /**
+   * The URL seeds the shared selection on every navigation. A pasted
+   * `#/compare?sa=3&la=12&sb=3&lb=9` has to reopen those two laps, and a link
+   * from the session page to the corner page has to carry its lap across.
+   * Slots the URL does not mention are left alone, so navigating between
+   * analysis pages never silently drops a selection.
+   */
+  $effect(() => {
+    analysis.adoptFromQuery(route.query);
+  });
 
-  /** No session at all yet — say so plainly rather than showing empty gauges. */
-  let waiting = $derived(session === null);
+  /* Corners and stints address a session through the query string; both fall
+     back to the current selection so the nav links work with no parameters. */
+  let cornerSession = $derived(intParam(route.query, 'session') ?? analysis.a?.sessionId ?? null);
+  let cornerLap = $derived(intParam(route.query, 'lap') ?? analysis.a?.lap ?? null);
+  let cornerRef = $derived(route.query.get('ref') ?? 'best');
+  let stintSession = $derived(intParam(route.query, 'session') ?? analysis.a?.sessionId ?? null);
 </script>
 
-<div class="app">
-  <ShiftStrip revPercent={store.fast?.rev_lights_percent ?? 0} {flag} {safetyCar} />
-
-  <Header
-    {session}
-    {lapNumber}
-    connection={store.connection}
-    health={store.health}
-    statusNote={store.statusNote}
-  />
-
-  <FlagBanner {flag} {safetyCar} />
-
-  {#if waiting}
-    <main class="waiting" data-layout="waiting">
-      <p class="headline">Waiting for telemetry</p>
-      <p class="hint">
-        Start a session in game. The dashboard picks its layout from the session type.
-      </p>
-    </main>
-  {:else if kind === 'race'}
-    <RaceLayout fast={store.fast} slow={store.slow} />
-  {:else if kind === 'time_trial'}
-    <TimeTrialLayout fast={store.fast} slow={store.slow} />
-  {:else if kind === 'quali' || kind === 'practice'}
-    <QualiLayout fast={store.fast} slow={store.slow} />
-  {:else}
-    <RaceLayout fast={store.fast} slow={store.slow} />
-  {/if}
-
-  <Toasts events={store.events} />
-</div>
-
-<style>
-  .app {
-    display: grid;
-    grid-template-rows: auto auto auto minmax(0, 1fr);
-    grid-template-areas:
-      'strip'
-      'header'
-      'banner'
-      'body';
-    height: 100dvh;
-    max-height: 100dvh;
-    overflow: hidden;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-
-  .waiting {
-    grid-area: body;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 0.4rem;
-    text-align: center;
-    padding: 2rem;
-  }
-
-  .headline {
-    margin: 0;
-    font-size: 1.8rem;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    color: var(--ink-2);
-  }
-
-  .hint {
-    margin: 0;
-    font-size: 0.95rem;
-    color: var(--ink-3);
-    max-width: 32rem;
-  }
-</style>
+{#if route.name === 'pitwall'}
+  <PitWall />
+{:else if isAnalysisRoute(route.name)}
+  <div class="analysis-shell" data-shell="analysis">
+    <AnalysisNav current={route.name} />
+    <div class="analysis-body">
+      {#if route.name === 'sessions'}
+        <SessionsPage />
+      {:else if route.name === 'session'}
+        <SessionDetailPage sessionId={Number(route.params['id'])} />
+      {:else if route.name === 'compare'}
+        <ComparePage />
+      {:else if route.name === 'corners'}
+        <CornersPage sessionId={cornerSession} lap={cornerLap} ref={cornerRef} />
+      {:else if route.name === 'stints'}
+        <StintsPage sessionId={stintSession} />
+      {:else}
+        <section class="analysis-page" data-page="notfound">
+          <h1 class="page-title">No such page</h1>
+          <p class="page-sub">
+            <code>{route.path}</code> is not a route in this app.
+          </p>
+          <p><a class="btn" href="#/sessions">Back to sessions</a></p>
+        </section>
+      {/if}
+    </div>
+  </div>
+{/if}

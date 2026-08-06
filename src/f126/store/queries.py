@@ -31,6 +31,7 @@ _BEST_LAP = """(SELECT min(latest.lap_time_ms) FROM (
 _SESSION_LIST_SQL = f"""
     SELECT s.*,
            {_LAP_COUNT} AS lap_count,
+           {_BEST_LAP} AS best_lap_ms,
            (SELECT p.name FROM participants p
              WHERE p.session_id = s.id AND p.is_player LIMIT 1) AS player_name
       FROM sessions s

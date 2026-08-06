@@ -1,0 +1,118 @@
+/**
+ * Formatting the analysis pages need and the pit wall does not.
+ *
+ * Kept separate from `format.ts` so the live dashboard's formatting surface
+ * stays exactly as it was. The two rules from there still apply and are the
+ * reason these exist at all: never render a partial or placeholder number, and
+ * never let the number of digits change between rows.
+ */
+
+import { DASH } from './format';
+
+/**
+ * A session's date. Epoch seconds in, a short local date out.
+ *
+ * The session browser is a list of things that happened, and the useful
+ * distinction between rows is the day, not the second. The time is included
+ * because two sessions on one evening are the common case.
+ */
+export function formatSessionDate(epochSeconds: number | null | undefined): string {
+  if (epochSeconds == null || !Number.isFinite(epochSeconds)) return DASH;
+  const d = new Date(epochSeconds * 1000);
+  if (Number.isNaN(d.getTime())) return DASH;
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+/** Distance along the lap: `1284.5` -> `"1285 m"`. */
+export function formatMetres(m: number | null | undefined, digits = 0): string {
+  if (m == null || !Number.isFinite(m)) return DASH;
+  return `${m.toFixed(digits)} m`;
+}
+
+/**
+ * A signed distance, for brake-point deltas.
+ *
+ * The sign convention is stated wherever this is used, because "later" and
+ * "earlier" are not obvious from a number: positive means braking further down
+ * the road than the reference.
+ */
+export function formatMetresDelta(m: number | null | undefined, digits = 0): string {
+  if (m == null || !Number.isFinite(m)) return DASH;
+  const sign = m > 0 ? '+' : m < 0 ? '−' : '±';
+  return `${sign}${Math.abs(m).toFixed(digits)}`;
+}
+
+/** Speed with a fixed decimal, or an em dash. */
+export function formatSpeed(kmh: number | null | undefined): string {
+  if (kmh == null || !Number.isFinite(kmh)) return DASH;
+  return kmh.toFixed(1);
+}
+
+/** Signed speed difference against a reference. */
+export function formatSpeedDelta(kmh: number | null | undefined): string {
+  if (kmh == null || !Number.isFinite(kmh)) return DASH;
+  const sign = kmh > 0 ? '+' : kmh < 0 ? '−' : '±';
+  return `${sign}${Math.abs(kmh).toFixed(1)}`;
+}
+
+/**
+ * Degradation as it is spoken: `78.4` -> `"0.078 s/lap"`.
+ *
+ * Milliseconds per lap is the contract's unit and the wrong one to read: nobody
+ * says "seventy-eight milliseconds a lap", they say "about eight hundredths".
+ */
+export function formatDegradation(msPerLap: number | null | undefined): string {
+  if (msPerLap == null || !Number.isFinite(msPerLap)) return DASH;
+  const sign = msPerLap > 0 ? '+' : msPerLap < 0 ? '−' : '±';
+  return `${sign}${(Math.abs(msPerLap) / 1000).toFixed(3)}`;
+}
+
+/** `0.913` -> `"0.91"`. Two decimals is all an r² is worth. */
+export function formatR2(r2: number | null | undefined): string {
+  if (r2 == null || !Number.isFinite(r2)) return DASH;
+  return r2.toFixed(2);
+}
+
+/** Percentage with one decimal, for tyre wear. */
+export function formatPercent(pct: number | null | undefined): string {
+  if (pct == null || !Number.isFinite(pct)) return DASH;
+  return `${pct.toFixed(1)}%`;
+}
+
+/**
+ * How well a fit is supported, as a word.
+ *
+ * An r² is a statistic most people cannot calibrate on sight, and a degradation
+ * slope read off a bad fit is worse than no number at all — so the chip says
+ * whether to believe it, and the number sits beside the word rather than alone.
+ */
+export function fitConfidence(r2: number | null | undefined): 'strong' | 'fair' | 'weak' {
+  if (r2 == null || !Number.isFinite(r2)) return 'weak';
+  if (r2 >= 0.8) return 'strong';
+  if (r2 >= 0.5) return 'fair';
+  return 'weak';
+}
+
+/** Corner kind as the table renders it. */
+export const CORNER_KIND_LABEL: Record<string, string> = {
+  slow: 'Slow',
+  medium: 'Medium',
+  fast: 'Fast'
+};
+
+/** A car's display name, falling back to its index. */
+export function carLabel(name: string | null | undefined, carIndex: number): string {
+  const trimmed = (name ?? '').trim();
+  return trimmed.length > 0 ? trimmed : `Car ${carIndex}`;
+}
+
+/** `3` + `12` -> `"S3 L12"`, the compact way a lap is referred to across pages. */
+export function lapLabel(sessionId: number, lap: number): string {
+  return `S${sessionId} L${lap}`;
+}

@@ -249,3 +249,257 @@ body {
 #app {
   user-select: none;
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * ANALYSIS
+ *
+ * Everything below is additive and scoped to the analysis routes. The pit wall
+ * uses none of these class names, and none of the rules above are modified —
+ * `#/` renders exactly the same pixels it did before analysis existed.
+ *
+ * Two global rules do have to be undone locally rather than globally. `body`
+ * sets `overflow: hidden` and `#app` sets `user-select: none`, both correct for
+ * a kiosk and both wrong for a page you read and quote numbers out of. The
+ * analysis shell restores scrolling inside its own container and re-enables
+ * selection for its subtree, which leaves the pit wall's rules untouched.
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * The chart palette (--chart-speed, --chart-lap-a, --chart-ahead, …) is NOT
+ * declared here. It is injected onto `:root` at start-up by
+ * `installChartPalette()` in src/lib/chart-theme.ts, which is its single source
+ * of truth and carries the rationale and the validator results.
+ *
+ * uPlot paints to a canvas and needs literal colour strings in JavaScript, so
+ * the palette has to be JavaScript. Declaring it here as well would be a second
+ * copy of every hue, and the first re-step would silently desynchronise a
+ * swatch from the trace it labels.
+ */
+
+/* The scroll container. A pit wall never scrolls; an archive always does. */
+.analysis-shell {
+  height: 100dvh;
+  max-height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  user-select: text;
+}
+
+.analysis-body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.9rem 0.9rem calc(2rem + env(safe-area-inset-bottom));
+}
+
+/*
+ * A measure cap. Tables of numbers are read row by row, and a row stretched
+ * across a 27-inch display loses the eye between the first and last cell.
+ */
+.analysis-page {
+  max-width: 92rem;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.page-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  font-stretch: 92%;
+}
+
+.page-sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-3);
+}
+
+/* ── tables ───────────────────────────────────────────────────────────────── */
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.data-table caption {
+  text-align: left;
+  padding-bottom: 0.35rem;
+  color: var(--ink-3);
+}
+
+.data-table th {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--surface-1);
+  z-index: 1;
+}
+
+.data-table td {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  color: var(--ink);
+}
+
+.data-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table tbody tr:hover td {
+  background: var(--surface-2);
+}
+
+/* A row that opens something. The pointer and the hover fill are the affordance;
+   the row is a real button for the keyboard. */
+.data-table tr.selectable {
+  cursor: pointer;
+}
+
+.data-table tr.selectable:focus-visible {
+  outline: 2px solid var(--line-strong);
+  outline-offset: -2px;
+}
+
+.data-table tr.is-selected td {
+  background: var(--surface-3);
+}
+
+/* Wide tables scroll inside their own panel rather than the page. */
+.table-scroll {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 60vh;
+  min-width: 0;
+}
+
+/* ── chips ────────────────────────────────────────────────────────────────── */
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.chip-plain {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.chip-plain .k {
+  color: var(--ink-3);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/*
+ * Corner kind is ordinal — slow, medium, fast — and is encoded in neutral
+ * lightness plus its own word. Spending a hue on it would put a third colour
+ * system on a page that already has lap identity and a diverging time loss.
+ */
+.kind-slow {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.kind-medium {
+  background: var(--surface-2);
+}
+.kind-fast {
+  background: transparent;
+}
+
+/* ── buttons ──────────────────────────────────────────────────────────────── */
+
+.btn {
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.btn:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.field select {
+  padding: 0.2rem 0.4rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+/* ── invalid / excluded ───────────────────────────────────────────────────── */
+
+/*
+ * A deleted or excluded lap is shown, never hidden — the contract is explicit
+ * that excluded laps are "flagged, not hidden". Struck-through and dimmed says
+ * "this exists and does not count" without removing the evidence.
+ */
+.is-excluded {
+  color: var(--ink-3);
+}
+
+.is-excluded .lap-time {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}

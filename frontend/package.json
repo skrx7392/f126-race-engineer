@@ -23,5 +23,8 @@
     "typescript": "^5.9.0",
     "vite": "^8.2.1",
     "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "uplot": "^1.6.32"
   }
 }
