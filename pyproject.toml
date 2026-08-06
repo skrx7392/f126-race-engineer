@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.40.0",
     "psycopg[binary]>=3.3.4",
     "zstandard>=0.25.0",
+    "numpy>=2.3",
+    "scipy>=1.16",
 ]
 
 [project.scripts]
