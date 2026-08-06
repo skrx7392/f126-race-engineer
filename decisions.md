@@ -1,0 +1,29 @@
+# Autonomous decisions log
+
+Decisions I (Claude) made without asking, for the repo owner's later review. Newest last.
+Reversals welcome — flag anything and I'll adjust.
+
+## 2026-08-06 — implementation kickoff
+
+1. **Python 3.14.6 chosen** as runtime: latest GA (3.15 is beta, excluded per the
+   latest-GA-releases rule). Pins: FastAPI 0.141.1, psycopg 3.3.4, Svelte 5.56.8, Vite 8.2.1.
+2. **Spec source order changed for autonomy:** parser is transcribed from the two reference
+   implementations (MacManley/f1-25-udp C headers for 2025; volodymyr-fed/F1Game.UDP C# for
+   2026 incl. CarTelemetry2) instead of blocking on extracting the EA forum post through your
+   browser (bot-blocked, needs interactive Chrome). Byte-size pin tests still enforce exact
+   wire sizes; the golden fixture from your first real session is the final validation.
+   Extracting the official EA doc into docs/ stays open as a follow-up.
+3. **PR-requirement rule removed from the main ruleset** (you said ignore PRs in greenfield).
+   Force-push and branch-deletion protection kept. Re-add the pull_request rule when the
+   greenfield phase ends — noted as a follow-up.
+4. **Module contracts frozen before fan-out:** `src/f126/types.py` (parser→state seam) and
+   `docs/ws-protocol.md` (state→web→frontend seam) written by the orchestrator so seven
+   parallel subagents (Opus 5) can build modules without file conflicts.
+5. **Workstream split:** parser / capture+replay / state / store / web-backend / frontend /
+   deploy+CI+README — strictly disjoint file ownership; integration wiring (`main.py`) done
+   at merge time by the orchestrator, one commit per workstream.
+6. **ghcr package will be flipped public immediately after the first image push** (GitHub
+   cannot set visibility on a package that doesn't exist yet).
+7. **`f126` database + role created on the shared Postgres** (postgres namespace) with a
+   generated password stored only as a k8s Secret in the new `f126` namespace; the role gets
+   rights on its own database only.

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+node_modules/
+frontend/dist/
+*.f1raw
+*.f1raw.open
+.env
+.DS_Store
+data/
