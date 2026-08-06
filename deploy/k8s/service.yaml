@@ -1,5 +1,5 @@
-# HTTP + WebSocket only. The UDP telemetry ingress does NOT go through a Service — the PS5
-# sends to the node IP (<NODE_IP>:20777) and reaches the pod via hostPort on the container.
+# HTTP + WebSocket only. The UDP telemetry ingress does NOT go through a Service — the console
+# sends to the node IP (<node-ip>:20777) and reaches the pod via hostPort on the container.
 apiVersion: v1
 kind: Service
 metadata:

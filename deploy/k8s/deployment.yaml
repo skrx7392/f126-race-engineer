@@ -41,7 +41,7 @@ spec:
             - name: http
               containerPort: 8000
               protocol: TCP
-            # hostPort binds <NODE_IP>:20777/udp directly on the node so the PS5 can send
+            # hostPort binds <node-ip>:20777/udp directly on the node so the console can send
             # telemetry to the node IP. This is what pins the pod to one replica.
             - name: telemetry
               containerPort: 20777

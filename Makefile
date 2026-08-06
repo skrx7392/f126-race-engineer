@@ -1,19 +1,34 @@
 # f126-race-engineer — developer + operator entry points.
 # Everything here is a thin, readable wrapper: no target hides a decision you'd want to see.
-# Full runbook (PS5 setup, first-time deploy, troubleshooting): README.md
+# Full runbook (console setup, first-time deploy, troubleshooting): README.md
 
-KUBE_CONTEXT ?= k3s-cluster-lan
+# Local, environment-specific configuration: kube context, dashboard host, node IP, image
+# repo. Gitignored — this repo is public and names no real infrastructure. Create it with
+# `cp deploy/.env.example deploy/.env`. The leading `-` means "optional": local-only targets
+# (dev, replay, test, lint, frontend) work in a fresh clone without it.
+-include deploy/.env
+
+# Anything below with `?=` can be overridden by deploy/.env, by the environment, or inline
+# on the command line (`make deploy IMAGE_TAG=sha-abc1234`). The vars with no default here
+# — KUBE_CONTEXT, IMAGE — have none on purpose: guessing them is how you deploy to the
+# wrong cluster.
 NAMESPACE    ?= f126
-IMAGE        ?= ghcr.io/skrx7392/f126-race-engineer
 IMAGE_TAG    ?= latest
 PLATFORM     ?= linux/amd64
 SPEED        ?= 1
+UDP_PORT     ?= 20777
 
-KUBECTL := kubectl --context $(KUBE_CONTEXT) --namespace $(NAMESPACE)
+# Fall back to the current kubectl context rather than emitting `--context ''` when unset;
+# the check-cluster guard is what actually stops cluster targets from running blind.
+KUBECTL := kubectl $(if $(KUBE_CONTEXT),--context $(KUBE_CONTEXT) )--namespace $(NAMESPACE)
+
+# Prefer the gitignored overlay (real host) over the tracked base (placeholder host).
+# See deploy/k8s/README.md.
+KUSTOMIZE_DIR := $(if $(wildcard deploy/local/kustomization.yaml),deploy/local,deploy/k8s)
 
 .DEFAULT_GOAL := help
-.PHONY: help dev replay test test-backend test-frontend lint lint-backend lint-frontend \
-        frontend image push deploy logs db-init
+.PHONY: help config dev replay test test-backend test-frontend lint lint-backend lint-frontend \
+        frontend image push deploy logs db-init check-cluster check-image
 
 help: ## Show this help
 	@echo "f126-race-engineer"
@@ -22,6 +37,60 @@ help: ## Show this help
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "Vars: IMAGE_TAG=$(IMAGE_TAG)  PLATFORM=$(PLATFORM)  KUBE_CONTEXT=$(KUBE_CONTEXT)"
+	@echo "Local config: deploy/.env $(if $(wildcard deploy/.env),(found),(MISSING — cp deploy/.env.example deploy/.env))"
+
+config: ## Print the resolved local config (what to type into the console's telemetry menu)
+	@echo "Local configuration — from deploy/.env (gitignored)"
+	@echo
+	@echo "  KUBE_CONTEXT    $(if $(KUBE_CONTEXT),$(KUBE_CONTEXT),<unset>)"
+	@echo "  NAMESPACE       $(NAMESPACE)"
+	@echo "  DASHBOARD_HOST  $(if $(DASHBOARD_HOST),$(DASHBOARD_HOST),<unset>)"
+	@echo "  NODE_IP         $(if $(NODE_IP),$(NODE_IP),<unset>)"
+	@echo "  UDP_PORT        $(UDP_PORT)"
+	@echo "  IMAGE           $(if $(IMAGE),$(IMAGE),<unset>)"
+	@echo "  kustomize dir   $(KUSTOMIZE_DIR)"
+	@echo
+	@echo "Console -> Settings -> Telemetry Settings:"
+	@echo "  UDP Telemetry     On"
+	@echo "  UDP Broadcast     Off"
+	@echo "  UDP IP Address    $(if $(NODE_IP),$(NODE_IP),<NODE_IP — set it in deploy/.env>)"
+	@echo "  UDP Port          $(UDP_PORT)"
+	@echo "  UDP Send Rate     60 Hz"
+	@echo "  UDP Format        2026 Season Pack"
+	@echo "  Your Telemetry    Public"
+	@echo
+	@echo "Dashboard: $(if $(DASHBOARD_HOST),https://$(DASHBOARD_HOST),<DASHBOARD_HOST — set it in deploy/.env>)"
+
+# --- guards -----------------------------------------------------------------
+# Cluster and registry targets refuse to run on guesses. Local-only targets never
+# depend on these.
+
+check-cluster:
+	@missing=""; \
+	[ -n "$(KUBE_CONTEXT)" ] || missing="$$missing KUBE_CONTEXT"; \
+	[ -n "$(NAMESPACE)" ]    || missing="$$missing NAMESPACE"; \
+	if [ -n "$$missing" ]; then \
+		echo "error: cluster target needs:$$missing"; \
+		echo; \
+		echo "These live in deploy/.env, which is gitignored and not in a fresh clone:"; \
+		echo "    cp deploy/.env.example deploy/.env"; \
+		echo "    \$$EDITOR deploy/.env"; \
+		echo; \
+		echo "Or pass them inline:"; \
+		echo "    make deploy KUBE_CONTEXT=\$$(kubectl config current-context)"; \
+		echo; \
+		echo "See deploy/.env.example for what each variable means."; \
+		exit 1; \
+	fi
+
+check-image:
+	@if [ -z "$(IMAGE)" ]; then \
+		echo "error: IMAGE is not set (e.g. ghcr.io/<user>/f126-race-engineer)."; \
+		echo; \
+		echo "Set it in deploy/.env (cp deploy/.env.example deploy/.env), or inline:"; \
+		echo "    make push IMAGE=ghcr.io/<user>/f126-race-engineer"; \
+		exit 1; \
+	fi
 
 # --- local development ------------------------------------------------------
 
@@ -59,7 +128,7 @@ lint-frontend:
 
 # --- image ------------------------------------------------------------------
 
-image: ## Build the container image locally (linux/amd64, loaded into the local daemon)
+image: check-image ## Build the container image locally (linux/amd64, loaded into the local daemon)
 	docker buildx build \
 		--platform $(PLATFORM) \
 		-f deploy/Dockerfile \
@@ -67,7 +136,7 @@ image: ## Build the container image locally (linux/amd64, loaded into the local 
 		--load \
 		.
 
-push: ## Build and push the image to GHCR (CD does this automatically on merge to main)
+push: check-image ## Build and push the image to the registry (CD does this on merge to main)
 	docker buildx build \
 		--platform $(PLATFORM) \
 		-f deploy/Dockerfile \
@@ -77,8 +146,13 @@ push: ## Build and push the image to GHCR (CD does this automatically on merge t
 
 # --- cluster ----------------------------------------------------------------
 
-deploy: ## Apply manifests to cluster and wait for the rollout
-	$(KUBECTL) apply -k deploy/k8s
+deploy: check-cluster check-image ## Apply manifests to the cluster and wait for the rollout
+ifeq ($(KUSTOMIZE_DIR),deploy/k8s)
+	@echo ">> WARNING: deploy/local/ not found — applying the tracked BASE (deploy/k8s)."
+	@echo ">> The base ingress host is the placeholder race.example.com and will not serve"
+	@echo ">> your domain. Create the overlay first: see deploy/k8s/README.md."
+endif
+	$(KUBECTL) apply -k $(KUSTOMIZE_DIR)
 ifeq ($(IMAGE_TAG),latest)
 	@# Re-applying an unchanged manifest does not restart the pod, so a freshly pushed
 	@# :latest would never be pulled. Force it. Pin IMAGE_TAG=sha-<shortsha> to avoid this
@@ -90,11 +164,11 @@ else
 endif
 	$(KUBECTL) rollout status deployment/f126 --timeout=180s
 
-logs: ## Tail the running pod's logs
+logs: check-cluster ## Tail the running pod's logs
 	$(KUBECTL) logs -f deployment/f126 --tail=100
 
-db-init: ## Print the one-time Postgres role/database bootstrap commands (does NOT run them)
-	@echo "One-time setup on the shared Postgres (namespace: postgres)."
+db-init: check-cluster ## Print the one-time Postgres role/database bootstrap commands (does NOT run them)
+	@echo "One-time setup on a Postgres reachable from the cluster (namespace: postgres)."
 	@echo "Deliberately not automated — it creates a role with a password you choose and"
 	@echo "must not be re-run blindly. Copy/paste from README.md > 'First-time deploy'."
 	@echo

@@ -5,20 +5,26 @@
 # `make deploy` never applies it. It lives here so the restriction is one command away rather
 # than a thing to reinvent under pressure.
 #
-# The dashboard exposes no mutating endpoints — it renders telemetry the PS5 already broadcast
-# on the LAN. The read-only invariant is what makes leaving it internet-open acceptable; if a
-# write path (setup editing, session deletion, an auth'd admin view) is ever added, turn this
-# on in the same change.
+# The dashboard exposes no mutating endpoints — it renders telemetry the game already broadcast
+# in clear text on the LAN. The read-only invariant is what makes leaving it internet-open
+# acceptable; if a write path (setup editing, session deletion, an auth'd admin view) is ever
+# added, turn this on in the same change.
+#
+# PLACEHOLDER RANGES below. Put your real CIDRs in a gitignored copy under deploy/local/
+# (see deploy/k8s/README.md) rather than editing this file — the public repo should not
+# describe anyone's network.
 #
 # To enable:
-#   kubectl --context k3s-cluster-lan apply -f deploy/k8s/middleware-ipallowlist.yaml
-#   # then add to ingress.yaml metadata.annotations (namespace-name@kubernetescrd is the
-#   # cluster's existing reference convention, cf. allpets-backend-redirect-https@kubernetescrd):
+#   kubectl --context "$KUBE_CONTEXT" apply -f deploy/local/middleware-ipallowlist.yaml
+#   # then add to ingress.yaml metadata.annotations (namespace-name@kubernetescrd is Traefik's
+#   # cross-namespace reference convention for CRD-provided middleware):
 #   traefik.ingress.kubernetes.io/router.middlewares: f126-ipallowlist@kubernetescrd
-#   kubectl --context k3s-cluster-lan apply -k deploy/k8s
+#   make deploy
 #
-# Note: with Traefik behind no external proxy on this cluster, the client IP Traefik sees is
-# the real remote address, so sourceRange matches directly and ipStrategy tuning is unneeded.
+# Note: with Traefik behind no external proxy, the client IP Traefik sees is the real remote
+# address, so sourceRange matches directly and ipStrategy tuning is unneeded. Behind a CDN or
+# an L7 load balancer this is NOT true — you would need ipStrategy.depth or excludedIPs, or
+# the allowlist will match the proxy instead of the client.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -30,5 +36,5 @@ metadata:
 spec:
   ipAllowList:
     sourceRange:
-      - <LAN_CIDR>    # home LAN (cluster node, PS5, desktops)
-      - 100.64.0.0/10   # Tailscale CGNAT range
+      - 192.0.2.0/24    # placeholder — your LAN (the node, the console, your desktops)
+      - 100.64.0.0/10   # Tailscale CGNAT range (keep if you use Tailscale)

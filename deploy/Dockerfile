@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# f126-race-engineer — multi-stage image, target platform linux/amd64 (k3s node "cluster").
+# f126-race-engineer — multi-stage image, target platform linux/amd64 (the k3s node it runs on).
 # Build from the REPO ROOT so the context contains both frontend/ and src/:
 #   docker buildx build --platform linux/amd64 -f deploy/Dockerfile -t <tag> .
 #
@@ -57,7 +57,7 @@ RUN uv sync --frozen --no-dev
 FROM python:3.14-slim AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/skrx7392/f126-race-engineer" \
-      org.opencontainers.image.description="F1 25/26 PS5 telemetry capture + live pit-wall dashboard" \
+      org.opencontainers.image.description="F1 25/26 UDP telemetry capture + live pit-wall dashboard" \
       org.opencontainers.image.licenses="MIT"
 
 # Fixed uid/gid so the PVC keeps consistent ownership across image rebuilds.

@@ -1,11 +1,17 @@
-# Conventions below are copied verbatim from the existing cluster ingresses
-# (allpets-backend/allpets-api-ingress, observability/grafana-ingress-redacted,
-# openwebui/openwebui-ingress) so this app matches the rest of the cluster:
+# PLACEHOLDER HOST — race.example.com is not a real address.
+#
+# This base is environment-agnostic on purpose: the real hostname lives in a
+# gitignored kustomize overlay (deploy/local/) that patches the three fields
+# below. See deploy/k8s/README.md for the pattern and a copy-paste overlay.
+#
+# Conventions this file follows, which you may want to match to the rest of your
+# cluster rather than to this repo:
 #   * ingressClassName: traefik
-#   * cert-manager.io/cluster-issuer: letsencrypt-cloudflare   (DNS-01 via Cloudflare;
-#     the older letsencrypt-prod issuer is only used by the legacy example.org ingresses)
+#   * cert-manager.io/cluster-issuer: letsencrypt-cloudflare  (DNS-01 via Cloudflare —
+#     rename to whatever ClusterIssuer you actually have; a DNS-01 issuer is required
+#     if the host is not publicly reachable on :80 for an HTTP-01 challenge)
 #   * TLS secretName = the host with dots replaced by dashes, suffixed -tls
-#     (api.allpets.example.com -> api-allpets-redacted-dev-tls)
+#     (race.example.com -> race-example-com-tls)
 #
 # WebSockets (/ws) need NO extra annotations: Traefik proxies the Upgrade handshake natively,
 # unlike nginx-ingress which needs proxy-read-timeout tuning.
@@ -38,4 +44,4 @@ spec:
   tls:
     - hosts:
         - race.example.com
-      secretName: race-redacted-dev-tls
+      secretName: race-example-com-tls

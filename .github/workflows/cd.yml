@@ -1,7 +1,7 @@
 # CD — build and publish the container image to GHCR on every merge to main.
 #
-# There is NO deploy step, by design (decisions.md): cluster is a single node that also has to
-# be free for actual racing, so deploys are a deliberate manual act — `make deploy` — not a
+# There is NO deploy step, by design (decisions.md): the cluster is a single node that also has
+# to be free for actual racing, so deploys are a deliberate manual act — `make deploy` — not a
 # side effect of merging. CI publishes the artifact; a human chooses when it goes live.
 #
 # SHARED DESIGN CONSTRAINT (see backend-ci.yml for the full rationale):
@@ -27,7 +27,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/skrx7392/f126-race-engineer
+  # Derived from the repository itself so a fork publishes to its own namespace with no edit.
+  # github.repository is "<owner>/<repo>"; GHCR requires it lowercase, which it already is for
+  # this repo. A fork with uppercase in either part must lowercase this expression.
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   image:
@@ -94,7 +97,7 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile
-          # cluster is amd64 and it is the only deploy target — building arm64 too would
+          # The cluster is amd64 and it is the only deploy target — building arm64 too would
           # roughly double CI time for an image nothing would ever pull.
           platforms: linux/amd64
           push: true

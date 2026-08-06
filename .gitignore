@@ -12,3 +12,11 @@ frontend/dist/
 .DS_Store
 data/
 .claude/
+
+# --- local, environment-specific configuration (never committed) -------------
+# This repo is deliberately environment-agnostic: every real hostname, node IP,
+# kube context and CIDR lives in one of the paths below. See deploy/.env.example
+# and deploy/k8s/README.md for the pattern.
+deploy/.env
+deploy/local/
+decisions-private.md

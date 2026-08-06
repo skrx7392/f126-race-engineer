@@ -1,6 +1,6 @@
 # Raw .f1raw capture files (zstd-compressed) + anything else the app writes under /data.
-# local-path is node-local on cluster: the volume is bound to the single node, which is fine
-# for a single-node cluster and matches replicas:1 + Recreate.
+# local-path is node-local: the volume is bound to whichever node first schedules the pod,
+# which is fine for a single-node cluster and matches replicas:1 + Recreate.
 #
 # local-path does NOT support volume expansion (allowVolumeExpansion=false), so 50Gi cannot be
 # grown in place later — resizing means creating a new PVC and copying. Sized generously up

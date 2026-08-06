@@ -3,6 +3,10 @@ kind: Kustomization
 
 namespace: f126
 
+# This is a BASE, not a deployable configuration: ingress.yaml carries a placeholder host
+# (race.example.com). Your real host belongs in a gitignored overlay at deploy/local/ —
+# see README.md in this directory. `make deploy` prefers that overlay when it exists.
+#
 # middleware-ipallowlist.yaml is intentionally ABSENT from this list — the dashboard is
 # internet-open by design. See the header comment in that file to turn it on.
 #
