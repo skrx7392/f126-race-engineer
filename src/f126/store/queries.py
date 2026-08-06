@@ -141,3 +141,115 @@ def events_for_session(conn: Conn, session_id: int, limit: int = 1_000) -> list[
         "SELECT * FROM events WHERE session_id = %s ORDER BY session_time_s, frame_id LIMIT %s",
         (session_id, max(1, int(limit))),
     )
+
+
+# --------------------------------------------------------------------------------------
+# Phase 2 analysis reads (f126.analysis / f126.web.analysis_routes)
+#
+# Added for the analysis API; the helpers above are untouched. Two things distinguish
+# these from the Phase 1 reads. They are *narrow* — the analysis endpoints run several
+# queries per request, so paying for `count(*)` over telemetry_samples the way
+# `session_detail` does would be wasteful — and they all resolve generations, because an
+# analysis that averaged a lap with its own superseded flashback take would be quietly
+# wrong rather than loudly broken.
+# --------------------------------------------------------------------------------------
+
+_SESSION_SUMMARY_SQL = """
+    SELECT id, session_uid, segment, track_id, track_name, session_type, session_type_name,
+           player_car_index, total_laps, started_at_wall
+      FROM sessions
+     WHERE id = %s
+"""
+
+_LAP_ROW_SQL = """
+    SELECT DISTINCT ON (car_index, lap_number) *
+      FROM laps
+     WHERE session_id = %s AND car_index = %s AND lap_number = %s
+     ORDER BY car_index, lap_number, generation DESC
+"""
+
+# "Best" must mean a lap the analysis can actually draw, so the EXISTS clause drops laps
+# whose telemetry was never written (the samples are dropped first when the DB is degraded,
+# and a lap recorded before capture started has a time but no trace).
+_BEST_LAP_WITH_TELEMETRY_SQL = """
+    SELECT latest.* FROM (
+        SELECT DISTINCT ON (car_index, lap_number) *
+          FROM laps
+         WHERE session_id = %s AND car_index = %s
+         ORDER BY car_index, lap_number, generation DESC) latest
+     WHERE latest.valid AND latest.lap_time_ms > 0
+       AND EXISTS (SELECT 1 FROM telemetry_samples t
+                    WHERE t.session_id = latest.session_id
+                      AND t.lap_number = latest.lap_number)
+     ORDER BY latest.lap_time_ms, latest.lap_number
+     LIMIT 1
+"""
+
+# telemetry_samples is append-only, so a flashback leaves both takes of the lap in the
+# table. The newest generation is the one that counts; COALESCE because rows written
+# before the generation column was populated carry NULL.
+_TELEMETRY_TRACE_SQL = """
+    SELECT t.* FROM telemetry_samples t
+     WHERE t.session_id = %s AND t.lap_number = %s
+       AND coalesce(t.generation, 0) = (
+           SELECT max(coalesce(generation, 0)) FROM telemetry_samples
+            WHERE session_id = %s AND lap_number = %s)
+     ORDER BY t.lap_distance_m, t.session_time_s
+     LIMIT %s
+"""
+
+_TYRE_STINTS_SQL = """
+    SELECT car_index, stint_no, compound_actual, compound_visual, lap_start, lap_end,
+           wear_at_end_json, end_reason
+      FROM tyre_stints
+     WHERE session_id = %s AND (%s::int IS NULL OR car_index = %s::int)
+     ORDER BY car_index, stint_no
+"""
+
+
+def session_summary(conn: Conn, session_id: int) -> JsonRow | None:
+    """Track identity and player car for one session. None if unknown.
+
+    The cheap half of `session_detail`: the analysis endpoints need `track_id` (to refuse a
+    cross-circuit comparison) and `player_car_index` (to default `car_index`), and nothing
+    else it computes.
+    """
+    rows = _fetch(conn, _SESSION_SUMMARY_SQL, (session_id,))
+    return rows[0] if rows else None
+
+
+def lap_row(conn: Conn, session_id: int, car_index: int, lap_number: int) -> JsonRow | None:
+    """One lap's newest generation — times, sectors, validity, compound. None if unknown."""
+    rows = _fetch(conn, _LAP_ROW_SQL, (session_id, car_index, lap_number))
+    return rows[0] if rows else None
+
+
+def best_lap_with_telemetry(conn: Conn, session_id: int, car_index: int) -> JsonRow | None:
+    """Fastest valid lap of one car that also has a telemetry trace. None if there is none.
+
+    Backs `?ref=best` on the corners endpoint.
+    """
+    rows = _fetch(conn, _BEST_LAP_WITH_TELEMETRY_SQL, (session_id, car_index))
+    return rows[0] if rows else None
+
+
+def telemetry_trace(
+    conn: Conn, session_id: int, lap_number: int, *, limit: int = 20_000
+) -> list[JsonRow]:
+    """One lap's telemetry, newest generation only, ordered by distance.
+
+    Bounded like every other unauthenticated read: 20k rows is 1000 s of 20 Hz samples,
+    two orders of magnitude more than the longest lap on the calendar.
+    """
+    return _fetch(
+        conn,
+        _TELEMETRY_TRACE_SQL,
+        (session_id, lap_number, session_id, lap_number, max(1, int(limit))),
+    )
+
+
+def tyre_stints_for_session(
+    conn: Conn, session_id: int, car_index: int | None = None
+) -> list[JsonRow]:
+    """Recorded tyre stints, optionally for one car. Empty when stints were never written."""
+    return _fetch(conn, _TYRE_STINTS_SQL, (session_id, car_index, car_index))
