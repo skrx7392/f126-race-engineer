@@ -10,6 +10,7 @@
 name: frontend-ci
 
 on:
+  workflow_dispatch: {}  # manual lever — Actions outage fallback
   pull_request:
   push:
     branches: [main]
