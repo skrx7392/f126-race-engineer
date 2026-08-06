@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: f126
+
+# middleware-ipallowlist.yaml is intentionally ABSENT from this list — the dashboard is
+# internet-open by design. See the header comment in that file to turn it on.
+#
+# No Secret is committed. `f126-db` (key: url) is created by hand on the cluster — README,
+# "First-time deploy". The deployment references it with optional:true so the pod starts
+# without it (raw capture keeps working, DB writes are disabled).
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+# Labels are set explicitly on each resource rather than via kustomize `labels:`/`commonLabels:`
+# — a label transformer that touches selectors would rewrite the Deployment's immutable
+# spec.selector.matchLabels and break every subsequent apply.
+
+# Pin a specific build for a reproducible deploy — edit newTag below, or override at apply
+# time without touching the file:
+#   make deploy IMAGE_TAG=sha-abc1234
+images:
+  - name: ghcr.io/skrx7392/f126-race-engineer
+    newTag: latest

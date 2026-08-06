@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f126
+  namespace: f126
+  labels:
+    app.kubernetes.io/name: f126
+    app.kubernetes.io/part-of: f126-race-engineer
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: hostPort 20777/UDP can only be held by one pod per node, and
+  # the local-path PVC is RWO. A rolling update would deadlock — the new pod would sit Pending
+  # on both the port and the volume while the old pod refuses to terminate.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: f126
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: f126
+        app.kubernetes.io/part-of: f126-race-engineer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # Belt-and-braces: local-path creates its host dir 0777 so this is not strictly needed
+        # (and kubelet skips fsGroup ownership management on hostPath-backed volumes anyway).
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: f126
+          # Tag is overridden by kustomize (see kustomization.yaml `images:`) — CD publishes
+          # both :latest and :sha-<shortsha>; pin the sha tag for a reproducible deploy.
+          image: ghcr.io/skrx7392/f126-race-engineer:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            # hostPort binds <NODE_IP>:20777/udp directly on the node so the PS5 can send
+            # telemetry to the node IP. This is what pins the pod to one replica.
+            - name: telemetry
+              containerPort: 20777
+              hostPort: 20777
+              protocol: UDP
+          env:
+            - name: F126_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: f126-db
+                  key: url
+                  # optional:true — the app degrades gracefully to raw-capture-only when the
+                  # DSN is absent (config.py: empty database_url disables DB writes). Lets the
+                  # pod start before the secret is created; see README "first-time deploy".
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # readOnlyRootFilesystem:true means /tmp must be an explicit writable mount.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            # The app writes only to /data (PVC) and /tmp (emptyDir), so the image filesystem
+            # can be sealed. PYTHONDONTWRITEBYTECODE=1 is set in the image; bytecode was
+            # precompiled at build time (UV_COMPILE_BYTECODE=1).
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: f126-data
+        - name: tmp
+          emptyDir: {}
+      # Give the UDP capture loop time to flush the open .f1raw segment on SIGTERM.
+      terminationGracePeriodSeconds: 30

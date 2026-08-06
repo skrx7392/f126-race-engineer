@@ -1,0 +1,50 @@
+# Keep the build context small and the layer cache stable.
+# NOTE: frontend/ and src/ are NOT excluded — the image builds both.
+
+.git
+.github
+.gitignore
+.dockerignore
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Node — reinstalled from the lockfile inside the image
+frontend/node_modules/
+frontend/dist/
+frontend/.svelte-kit/
+frontend/.vite/
+node_modules/
+
+# Local state that must never bake into an image
+data/
+*.f1raw
+*.f1raw.open
+.env
+.env.*
+
+# Not needed at build time.
+# NOTE: tools/ is deliberately NOT excluded — tools/sniff.py is copied into the runtime image
+# so telemetry can be diagnosed in-pod (README > Troubleshooting).
+deploy/k8s/
+docs/
+tests/
+Makefile
+README.md
+decisions.md
+*.md
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

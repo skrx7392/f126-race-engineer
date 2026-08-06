@@ -1,0 +1,110 @@
+# Backend CI — ruff + pytest against a throwaway Postgres.
+#
+# SHARED DESIGN CONSTRAINT (all three workflows in this directory follow it):
+#   "Required-check-safe path filtering."
+#
+#   GitHub's workflow-level `on.push.paths` / `on.pull_request.paths` filters are a trap for
+#   required status checks: when the paths don't match, the workflow never starts, no check run
+#   is ever created, and a branch protection rule requiring that check blocks the PR forever
+#   waiting for a check that will never report.
+#
+#   So: every workflow ALWAYS triggers on pull_request and on push to main, and does its own
+#   path check as its FIRST step (dorny/paths-filter). When the paths didn't change, the heavy
+#   steps are individually skipped via `if:` and the job still finishes with a green,
+#   conclusive `success`. The check is therefore always reported, and every one of these can be
+#   marked "required" in branch protection without deadlocking unrelated PRs.
+#
+#   Note the filtering is per-STEP, not per-JOB: a job-level `if:` produces a `skipped`
+#   conclusion, whose treatment by branch protection is version-dependent. `success` is not.
+
+name: backend-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Minimal default token scope; no job here needs more.
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+
+    # Service containers start before the first step runs, so this Postgres spins up even on a
+    # frontend-only PR that skips every real step. ~5s of wasted runner time, accepted as the
+    # price of the always-conclusive single-job shape described above.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: f126
+          POSTGRES_PASSWORD: f126-ci-throwaway
+          POSTGRES_DB: f126_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U f126 -d f126_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Inline credentials are intentional: this container is created and destroyed inside one
+      # ephemeral runner and is not reachable from anywhere else. A secret here would buy
+      # nothing and make the workflow harder to run from a fork.
+      F126_TEST_DATABASE_URL: postgresql://f126:f126-ci-throwaway@localhost:5432/f126_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # paths-filter compares against the base commit; on push events it needs real
+          # history rather than the default depth-1 shallow clone.
+          fetch-depth: 0
+
+      - name: Detect backend changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/backend-ci.yml'
+
+      - name: No backend changes — skipping (conclusive no-op)
+        if: steps.filter.outputs.backend != 'true'
+        run: echo "No changes under src/, tests/, pyproject.toml or uv.lock. Reporting success."
+
+      - name: Install uv
+        if: steps.filter.outputs.backend == 'true'
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        if: steps.filter.outputs.backend == 'true'
+        # --frozen: fail loudly if uv.lock is stale rather than silently re-resolving.
+        # Dev group included — it carries ruff and pytest.
+        run: uv sync --frozen
+
+      - name: Lint (ruff)
+        if: steps.filter.outputs.backend == 'true'
+        # Lint only, deliberately not `ruff format --check`: the modules are being written in
+        # parallel by separate workstreams that never agreed to a formatter gate. Add the
+        # format check once the tree is merged and formatted once.
+        run: uv run ruff check .
+
+      - name: Test (pytest)
+        if: steps.filter.outputs.backend == 'true'
+        run: uv run pytest -q

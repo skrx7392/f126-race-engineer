@@ -1,0 +1,19 @@
+# HTTP + WebSocket only. The UDP telemetry ingress does NOT go through a Service — the PS5
+# sends to the node IP (<NODE_IP>:20777) and reaches the pod via hostPort on the container.
+apiVersion: v1
+kind: Service
+metadata:
+  name: f126
+  namespace: f126
+  labels:
+    app.kubernetes.io/name: f126
+    app.kubernetes.io/part-of: f126-race-engineer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: f126
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP

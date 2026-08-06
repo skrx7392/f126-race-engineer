@@ -1,0 +1,41 @@
+# Conventions below are copied verbatim from the existing cluster ingresses
+# (allpets-backend/allpets-api-ingress, observability/grafana-ingress-redacted,
+# openwebui/openwebui-ingress) so this app matches the rest of the cluster:
+#   * ingressClassName: traefik
+#   * cert-manager.io/cluster-issuer: letsencrypt-cloudflare   (DNS-01 via Cloudflare;
+#     the older letsencrypt-prod issuer is only used by the legacy example.org ingresses)
+#   * TLS secretName = the host with dots replaced by dashes, suffixed -tls
+#     (api.allpets.example.com -> api-allpets-redacted-dev-tls)
+#
+# WebSockets (/ws) need NO extra annotations: Traefik proxies the Upgrade handshake natively,
+# unlike nginx-ingress which needs proxy-read-timeout tuning.
+#
+# Deliberately NOT referencing any Traefik middleware — see middleware-ipallowlist.yaml for
+# the opt-in IP restriction, which is disabled by design.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: f126-ingress
+  namespace: f126
+  labels:
+    app.kubernetes.io/name: f126
+    app.kubernetes.io/part-of: f126-race-engineer
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-cloudflare
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: race.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: f126
+                port:
+                  number: 8000
+  tls:
+    - hosts:
+        - race.example.com
+      secretName: race-redacted-dev-tls
