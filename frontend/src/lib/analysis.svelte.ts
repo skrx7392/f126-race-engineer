@@ -164,12 +164,21 @@ export class AnalysisStore {
     });
   }
 
-  /** Link to the corner view. Corners are always "A versus its reference". */
+  /**
+   * Link to the corner view. Corners are always "A versus its reference".
+   *
+   * A B-slot from another session used to be dropped here and silently replaced with
+   * `best`, so crossing over from a cross-session comparison lost the reference without
+   * saying so. The corners endpoint takes `ref_session` now, so B is carried either way.
+   */
   cornersHref(ref: string | number = 'best'): string {
+    const b = this.b;
+    const crossSession = b !== null && b.sessionId !== this.a?.sessionId;
     return href('/corners', {
       session: this.a?.sessionId,
       lap: this.a?.lap,
-      ref: this.b !== null && this.b.sessionId === this.a?.sessionId ? this.b.lap : ref
+      ref: b !== null ? b.lap : ref,
+      ref_session: crossSession ? b.sessionId : undefined
     });
   }
 }

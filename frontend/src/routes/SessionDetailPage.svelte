@@ -18,7 +18,7 @@
   import { LOADING, analysis, type Async } from '../lib/analysis.svelte';
   import { href } from '../lib/router.svelte';
   import { formatLapTime, formatSectorTime, DASH } from '../lib/format';
-  import { carLabel, formatSessionDate } from '../lib/analysis-format';
+  import { carLabel, displayStintRanges, formatSessionDate } from '../lib/analysis-format';
   import { compoundOf, actualCompoundName } from '../lib/enums';
   import { CHART_INK, LAP, xAxisDistance, yAxis } from '../lib/chart-theme';
   import StatePanel from '../components/StatePanel.svelte';
@@ -90,6 +90,29 @@
 
   let rows = $derived(laps.status === 'ok' ? laps.data : []);
   let detail = $derived(session.status === 'ok' ? session.data : null);
+
+  /** The player's car, however the session identifies it. */
+  let playerCarIndex = $derived(
+    detail?.player_car_index ??
+      detail?.participants.find((p) => p.is_player)?.car_index ??
+      null
+  );
+
+  /**
+   * How many laps the driver actually ran.
+   *
+   * `lap_count` is every car's laps added together — 267 for a 13-lap race on a
+   * full grid. That is a true statement about the archive and a wrong answer to
+   * "how long was this session", so it is the last resort. The list endpoint
+   * computes `player_lap_count`; the detail endpoint does not, so when the laps
+   * on screen are already the player's they are counted here instead.
+   */
+  let playerLapCount = $derived.by(() => {
+    if (detail?.player_lap_count != null) return detail.player_lap_count;
+    const car = playerCarIndex;
+    if (car === null || carIndex !== car || rows.length === 0) return null;
+    return new Set(rows.map((l) => l.lap_number)).size;
+  });
 
   /** The quickest valid lap in the listed set — the natural reference. */
   let bestLapNumber = $derived.by(() => {
@@ -196,6 +219,12 @@
     const last = rows.at(-1)?.lap_number ?? detail?.total_laps ?? 1;
     return Math.max(1, last);
   });
+
+  /**
+   * Ranges with the pit lap attributed once, so the strip's widths and labels
+   * agree with each other and with the laps run. See `displayStintRanges`.
+   */
+  let stintRanges = $derived(displayStintRanges(stints, lapSpan));
 </script>
 
 <section class="analysis-page" data-page="session-detail">
@@ -214,7 +243,10 @@
         </div>
 
         <div class="chip-row">
-          <span class="chip-plain"><span class="k">Laps</span> {s.lap_count}</span>
+          <span class="chip-plain" title="{s.lap_count} lap records across all cars">
+            <span class="k">Laps</span>
+            {playerLapCount ?? s.lap_count}
+          </span>
           <span class="chip-plain">
             <span class="k">Best</span>
             <span class="clock">{formatLapTime(s.best_lap_ms)}</span>
@@ -233,14 +265,13 @@
             <span class="label">{lapSpan} laps</span>
           </div>
           <div class="strip">
-            {#each stints as stint (stint.stint_no)}
-              {@const from = stint.lap_start ?? 1}
-              {@const to = stint.lap_end ?? lapSpan}
+            {#each stints as stint, i (stint.stint_no)}
+              {@const range = stintRanges[i]}
               {@const compound = compoundOf(stint.compound_visual)}
               <div
                 class="stint"
-                style="flex-grow: {Math.max(1, to - from + 1)}"
-                title="Stint {stint.stint_no}: laps {from}–{to}, {compound.label}"
+                style="flex-grow: {Math.max(1, range.laps)}"
+                title="Stint {stint.stint_no}: laps {range.from}–{range.to}, {compound.label}"
               >
                 <span
                   class="pill"
@@ -252,7 +283,7 @@
                     <span class="muted"> {actualCompoundName(stint.compound_actual)}</span>
                   {/if}
                 </span>
-                <span class="stint-laps clock">{from}–{to}</span>
+                <span class="stint-laps clock">{range.from}–{range.to}</span>
               </div>
             {/each}
           </div>

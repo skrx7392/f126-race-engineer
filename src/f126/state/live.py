@@ -880,6 +880,17 @@ class LiveState:
             "projected_wear_end_pct": projected,
             "compound_actual": status.tyre_compound_actual if status else None,
             "compound_visual": status.tyre_compound_visual if status else None,
+            # The game's own counter, passed through unmodified. Measured against the
+            # Jeddah race capture it is *laps completed on this set*, not laps started:
+            # it reads 0 for the whole lap the tyres are fitted on and ticks to 1 as that
+            # lap ends. So a set fitted during lap 6 reads 7 while lap 13 is running.
+            #
+            # This is deliberately NOT recomputed from the stint boundaries. The stint
+            # strip answers a different question -- which laps were *driven* on each set,
+            # where the pit lap is attributed to the stint it started on -- and the two
+            # only look inconsistent if the strip counts the in-lap twice. It no longer
+            # does (see `displayStintRanges` in the frontend), so a set fitted on lap 6
+            # shows a 7-lap stint here and a 7-lap range there.
             "age_laps": status.tyre_age_laps if status else None,
         }
 
@@ -900,9 +911,23 @@ class LiveState:
             ),
         }
 
+    def _harvested_lap_j(self) -> float | None:
+        """2026 routes the per-lap energy through TelemetryView; 2025 via StatusView."""
+        if self._telemetry is not None and self._telemetry.energy_harvested_lap_j is not None:
+            return self._telemetry.energy_harvested_lap_j
+        if self._status is not None and self._status.ers_harvested_lap_j is not None:
+            return self._status.ers_harvested_lap_j
+        return None
+
+    def _deployed_lap_j(self) -> float | None:
+        if self._telemetry is not None and self._telemetry.energy_deployed_lap_j is not None:
+            return self._telemetry.energy_deployed_lap_j
+        if self._status is not None and self._status.ers_deployed_lap_j is not None:
+            return self._status.ers_deployed_lap_j
+        return None
+
     def _energy_payload(self) -> dict[str, Any]:
         store = self._energy_store_j()
-        status = self._status
         capacity = self._energy_capacity_j
         if store is not None:
             capacity = self._energy_capacity_j = max(capacity, store)
@@ -912,8 +937,8 @@ class LiveState:
                 round(100.0 * store / capacity, 2) if store is not None and capacity > 0 else None
             ),
             "deploy_mode": self._deploy_mode(),
-            "harvested_lap_j": status.ers_harvested_lap_j if status else None,
-            "deployed_lap_j": status.ers_deployed_lap_j if status else None,
+            "harvested_lap_j": self._harvested_lap_j(),
+            "deployed_lap_j": self._deployed_lap_j(),
         }
 
     def _damage_payload(self) -> dict[str, Any]:

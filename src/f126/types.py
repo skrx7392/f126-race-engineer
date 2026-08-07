@@ -84,6 +84,8 @@ class TelemetryView:
     # 2026 energy-system extras (None on 2025 format)
     energy_store_j: float | None = None
     energy_deploy_mode: int | None = None
+    energy_harvested_lap_j: float | None = None
+    energy_deployed_lap_j: float | None = None
 
 
 @dataclass(slots=True)

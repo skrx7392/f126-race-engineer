@@ -78,6 +78,27 @@ describe('#/sessions', () => {
     });
   });
 
+  it('counts the laps you drove, not the lap records of every car', async () => {
+    restore = installAnalysisMock();
+    const { container } = render(App);
+    await screen.findByTestId('sessions-table');
+
+    const first = mockSessions()[0];
+    if (!first) throw new Error('fixture has no sessions');
+    // The fixture runs two cars, so the two numbers cannot be confused.
+    expect(first.lap_count).toBe((first.player_lap_count ?? 0) * 2);
+
+    await waitFor(() => {
+      const cell = container.querySelector(
+        `tr[data-session-id="${first.id}"] td:nth-child(4)`
+      ) as HTMLElement | null;
+      expect(cell).not.toBeNull();
+      expect(cell?.textContent?.trim()).toBe(String(first.player_lap_count));
+      // The all-cars total is still reachable, just not shouted.
+      expect(cell?.getAttribute('title')).toContain(String(first.lap_count));
+    });
+  });
+
   it('links each row to its session detail route', async () => {
     restore = installAnalysisMock();
     const { container } = render(App);

@@ -737,6 +737,8 @@ def test_realistic_session_roundtrip(scratch_url: str) -> None:
         assert detail["telemetry_sample_count"] == 2000
         assert detail["event_count"] == 30
         assert detail["best_lap_ms"] == 90_500  # newest generation of lap 7, valid
+        assert detail["field_best_lap_ms"] == 90_500  # all fixture laps are the player's
+        assert listed[0]["best_lap_ms"] == 90_500  # list "best" = player's best
         assert queries.session_detail(conn, session_id + 999) is None
 
         laps = queries.laps_for_session(conn, session_id)

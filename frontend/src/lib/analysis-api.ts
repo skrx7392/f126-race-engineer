@@ -34,8 +34,23 @@ export interface SessionSummary {
   weather_json: unknown;
   final_classification_json: unknown;
   raw_file: string | null;
-  /** Computed: `count(DISTINCT (car_index, lap_number))`. */
+  /** Computed: `count(DISTINCT (car_index, lap_number))`, across every car. */
   lap_count: number;
+  /**
+   * Computed: the player car's own distinct lap count.
+   *
+   * Optional because only the list endpoint computes it — the detail query is a
+   * single row and does not — so a page that needs it there counts the laps it
+   * has already fetched instead.
+   */
+  player_lap_count?: number | null;
+  /**
+   * How many recorder segments this row aggregates (pauses, process restarts).
+   * List endpoint only, for the same reason as `player_lap_count`.
+   */
+  segments?: number | null;
+  /** The fastest valid lap by *any* car; `best_lap_ms` is the player's own. */
+  field_best_lap_ms: number | null;
   player_name: string | null;
   /**
    * Not part of the list contract today — `best_lap_ms` is computed only by the
@@ -163,7 +178,16 @@ export interface Corner {
 export interface CornersResponse {
   session_id: number;
   lap_number: number;
-  ref_lap_number: number;
+  ref_lap_number: number | null;
+  /** Which session the reference lap came from. May differ from `session_id`. */
+  ref_session_id?: number | null;
+  /** Caption for a cross-session reference, e.g. "One-Shot Qualifying · Aug 07". */
+  ref_session_label?: string | null;
+  /**
+   * The subject lap was the only thing available to compare against. The reference
+   * columns are meaningless (±0, or null) and the page says so rather than showing them.
+   */
+  self_reference?: boolean;
   corners: Corner[];
   straights_time_loss_ms: number;
   total_delta_ms: number;
@@ -338,10 +362,16 @@ export const fetchCorners = (
   sessionId: number,
   lap: number,
   ref: string | number = 'best',
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  refSession?: number | null
 ): Promise<CornersResponse> =>
   apiGet<CornersResponse>(
-    `/api/analysis/corners${q({ session_id: sessionId, lap, ref })}`,
+    `/api/analysis/corners${q({
+      session_id: sessionId,
+      lap,
+      ref,
+      ref_session: refSession ?? undefined
+    })}`,
     signal
   );
 

@@ -22,10 +22,18 @@ JsonRow = dict[str, Any]
 # Superseded lap generations must not be counted twice, nor win the "best lap" race.
 _LAP_COUNT = """(SELECT count(DISTINCT (l.car_index, l.lap_number))
                FROM laps l WHERE l.session_id = s.id)"""
+# Field best: the fastest valid lap by ANY car (the session's headline time).
 _BEST_LAP = """(SELECT min(latest.lap_time_ms) FROM (
                SELECT DISTINCT ON (car_index, lap_number) lap_time_ms, valid
                  FROM laps WHERE session_id = s.id
                 ORDER BY car_index, lap_number, generation DESC) latest
+            WHERE latest.valid AND latest.lap_time_ms > 0)"""
+# Player best: the driver's own fastest valid lap — what "best" means to the person
+# reading the session list (showing the AI pole time as "best" misportrayed quali).
+_PLAYER_BEST = """(SELECT min(latest.lap_time_ms) FROM (
+               SELECT DISTINCT ON (lap_number) lap_time_ms, valid
+                 FROM laps WHERE session_id = s.id AND car_index = s.player_car_index
+                ORDER BY lap_number, generation DESC) latest
             WHERE latest.valid AND latest.lap_time_ms > 0)"""
 
 _SESSION_LIST_SQL = f"""
@@ -35,19 +43,22 @@ _SESSION_LIST_SQL = f"""
                (SELECT count(DISTINCT (l.car_index, l.lap_number)) FROM laps l
                  WHERE l.session_id = s.id AND l.car_index = s.player_car_index)
                    AS player_lap_count,
-               {_BEST_LAP} AS best_lap_ms,
+               {_PLAYER_BEST} AS best_lap_ms,
+               {_BEST_LAP} AS field_best_lap_ms,
                (SELECT p.name FROM participants p
                  WHERE p.session_id = s.id AND p.is_player LIMIT 1) AS player_name
           FROM sessions s
          WHERE s.session_uid <> '0'
     ),
     -- One game session can span several segment rows (pauses, process restarts).
-    -- The representative row is the segment with the most laps: that is the one
-    -- whose id the detail/analysis endpoints should be pointed at.
+    -- The representative row is the segment with the most laps AMONG those that
+    -- know their track/type (pre-fix fragments could die before the 2 Hz Session
+    -- packet arrived): that is the one detail/analysis endpoints are pointed at.
     rep AS (
         SELECT DISTINCT ON (session_uid) *
           FROM seg
-         ORDER BY session_uid, lap_count DESC NULLS LAST, id DESC
+         ORDER BY session_uid, (track_id >= 0 AND session_type > 0) DESC,
+                  lap_count DESC NULLS LAST, id DESC
     ),
     agg AS (
         SELECT session_uid,
@@ -58,7 +69,8 @@ _SESSION_LIST_SQL = f"""
                -- is the honest cross-segment aggregate.
                max(lap_count) AS lap_count,
                max(player_lap_count) AS player_lap_count,
-               min(best_lap_ms) AS best_lap_ms
+               min(best_lap_ms) AS best_lap_ms,
+               min(field_best_lap_ms) AS field_best_lap_ms
           FROM seg
          GROUP BY session_uid
     )
@@ -69,7 +81,7 @@ _SESSION_LIST_SQL = f"""
            agg.segments,
            agg.first_started_at_wall AS started_at_wall,
            agg.last_ended_at_wall AS ended_at_wall,
-           agg.lap_count, agg.player_lap_count, agg.best_lap_ms
+           agg.lap_count, agg.player_lap_count, agg.best_lap_ms, agg.field_best_lap_ms
       FROM rep JOIN agg USING (session_uid)
      WHERE %s::bool OR coalesce(agg.player_lap_count, 0) > 0 OR coalesce(agg.lap_count, 0) > 0
      ORDER BY agg.first_started_at_wall DESC NULLS LAST, rep.id DESC
@@ -83,7 +95,8 @@ _SESSION_ONE_SQL = f"""
                AS telemetry_sample_count,
            (SELECT count(*) FROM wear_samples w WHERE w.session_id = s.id) AS wear_sample_count,
            (SELECT count(*) FROM events e WHERE e.session_id = s.id) AS event_count,
-           {_BEST_LAP} AS best_lap_ms
+           {_PLAYER_BEST} AS best_lap_ms,
+           {_BEST_LAP} AS field_best_lap_ms
       FROM sessions s
      WHERE s.id = %s
 """
@@ -220,10 +233,33 @@ _BEST_LAP_WITH_TELEMETRY_SQL = """
          WHERE session_id = %s AND car_index = %s
          ORDER BY car_index, lap_number, generation DESC) latest
      WHERE latest.valid AND latest.lap_time_ms > 0
+       AND (%s::int IS NULL OR latest.lap_number <> %s::int)
        AND EXISTS (SELECT 1 FROM telemetry_samples t
                     WHERE t.session_id = latest.session_id
                       AND t.lap_number = latest.lap_number)
      ORDER BY latest.lap_time_ms, latest.lap_number
+     LIMIT 1
+"""
+
+# Same idea as _BEST_LAP_WITH_TELEMETRY_SQL, widened to every session at one circuit, so a
+# race lap can be measured against the weekend's quali benchmark. Each session has its own
+# player index, hence the join on `s.player_car_index` rather than a passed-in car index.
+# `s.track_id = %s` is an equality on the sentinel-bearing column: -1 means "the session
+# packet never landed", and matching -1 to -1 would compare two unknown circuits, so
+# callers pass a real track_id only.
+_TRACK_BEST_LAP_WITH_TELEMETRY_SQL = """
+    SELECT latest.* FROM (
+        SELECT DISTINCT ON (l.session_id, l.car_index, l.lap_number) l.*
+          FROM laps l
+          JOIN sessions s ON s.id = l.session_id
+         WHERE s.track_id = %s AND l.car_index = s.player_car_index
+         ORDER BY l.session_id, l.car_index, l.lap_number, l.generation DESC) latest
+     WHERE latest.valid AND latest.lap_time_ms > 0
+       AND NOT (latest.session_id = %s AND latest.lap_number = %s)
+       AND EXISTS (SELECT 1 FROM telemetry_samples t
+                    WHERE t.session_id = latest.session_id
+                      AND t.lap_number = latest.lap_number)
+     ORDER BY latest.lap_time_ms, latest.session_id, latest.lap_number
      LIMIT 1
 """
 
@@ -266,12 +302,39 @@ def lap_row(conn: Conn, session_id: int, car_index: int, lap_number: int) -> Jso
     return rows[0] if rows else None
 
 
-def best_lap_with_telemetry(conn: Conn, session_id: int, car_index: int) -> JsonRow | None:
+def best_lap_with_telemetry(
+    conn: Conn, session_id: int, car_index: int, *, exclude_lap: int | None = None
+) -> JsonRow | None:
     """Fastest valid lap of one car that also has a telemetry trace. None if there is none.
 
-    Backs `?ref=best` on the corners endpoint.
+    Backs `?ref=best` on the corners endpoint. `exclude_lap` skips one lap number, which is
+    how the corners route avoids resolving the reference to the subject lap itself and
+    rendering an all-zeros self-comparison.
     """
-    rows = _fetch(conn, _BEST_LAP_WITH_TELEMETRY_SQL, (session_id, car_index))
+    rows = _fetch(
+        conn, _BEST_LAP_WITH_TELEMETRY_SQL, (session_id, car_index, exclude_lap, exclude_lap)
+    )
+    return rows[0] if rows else None
+
+
+def track_best_lap_with_telemetry(
+    conn: Conn,
+    track_id: int,
+    *,
+    exclude_session_id: int | None = None,
+    exclude_lap: int | None = None,
+) -> JsonRow | None:
+    """The player's fastest drawable lap at one circuit, across every session there.
+
+    Backs `?ref=track_best`. Only the player car of each session is considered — telemetry
+    is a player-only table, so nobody else's lap could be drawn anyway. The excluded pair
+    keeps the subject lap out of its own reference.
+    """
+    rows = _fetch(
+        conn,
+        _TRACK_BEST_LAP_WITH_TELEMETRY_SQL,
+        (track_id, exclude_session_id, exclude_lap),
+    )
     return rows[0] if rows else None
 
 

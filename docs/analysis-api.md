@@ -16,7 +16,12 @@ One lap's trace for charts. Downsampling: none (rows are already 20 Hz).
  "steer": [...], "gear": [...], "rpm": [...], "drs_or_aero": [...],
  "session_time_s": [...]}
 ```
-Arrays are parallel, ordered by `distance_m`. 404 if lap/session unknown; 503 if DB down.
+Arrays are parallel, ordered by `distance_m`, which is **strictly increasing**. The axis is
+emitted rounded to centimetres, and at 20 Hz a car crawling off the grid or through the pit
+lane puts two consecutive samples inside the same centimetre; those collisions are dropped
+here (the later sample of each pair is kept, being the more recent observation of that point
+on track, which also keeps `session_time_s` monotonic). `points` counts what is emitted.
+404 if lap/session unknown; 503 if DB down.
 
 ## `GET /api/analysis/compare?session_a=3&lap_a=12&session_b=3&lap_b=15`
 Two laps resampled onto a common distance grid (same-session or cross-session at the same
@@ -30,11 +35,33 @@ track; 422 if track ids differ).
  "sectors_a": [s1,s2,s3], "sectors_b": [s1,s2,s3]}
 ```
 
-## `GET /api/analysis/corners?session_id=3&lap=12&ref=best`
-Corner segmentation for one lap versus a reference (`ref=best` — session-best valid lap of
-the player — or an explicit lap number).
+## `GET /api/analysis/corners?session_id=3&lap=12&ref=best[&ref_session=7]`
+Corner segmentation for one lap versus a reference.
+
+| `ref` | Reference lap |
+| --- | --- |
+| `best` (default) | the player's fastest valid, telemetry-backed lap **in that session** |
+| `track_best` | the same, widened to **every session at the same circuit** — a race lap against the weekend's quali benchmark |
+| a lap number | that lap |
+
+`ref_session` reads the reference out of another session instead of the subject's own; it
+combines with `ref=best` ("that session's best") or an explicit lap number. A reference from
+a different circuit is a **422**, matching `compare`.
+
+Automatic resolution (`best`, `track_best`) never returns the subject lap itself — that
+produced an all-zeros table that read like a real, perfectly-matched comparison. When the
+subject is the only drawable lap, the corners still come back with every reference-derived
+field `null` and `self_reference: true`. An explicit `ref=<subject lap>` is honoured as an
+identity check but is still flagged.
+
+Corner numbering is anchored to the **subject** lap: segmentation runs on its speed trace
+alone and the reference is only read through those windows, so corner `n` means the same
+corner regardless of which reference — or session — was chosen.
 ```json
 {"session_id": 3, "lap_number": 12, "ref_lap_number": 9,
+ "ref_session_id": 7,                       // may differ from session_id
+ "ref_session_label": "One-Shot Qualifying · Aug 07",   // caption, null when same-session
+ "self_reference": false,                   // true = nothing but the subject to compare to
  "corners": [
    {"n": 1, "entry_m": 210.0, "apex_m": 285.0, "exit_m": 350.0,
     "min_speed_kmh": 118.2, "ref_min_speed_kmh": 121.0,

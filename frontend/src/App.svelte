@@ -43,6 +43,8 @@
   let cornerSession = $derived(intParam(route.query, 'session') ?? analysis.a?.sessionId ?? null);
   let cornerLap = $derived(intParam(route.query, 'lap') ?? analysis.a?.lap ?? null);
   let cornerRef = $derived(route.query.get('ref') ?? 'best');
+  /** Read the reference lap out of another session at the same circuit. */
+  let cornerRefSession = $derived(intParam(route.query, 'ref_session'));
   let stintSession = $derived(intParam(route.query, 'session') ?? analysis.a?.sessionId ?? null);
 </script>
 
@@ -59,7 +61,12 @@
       {:else if route.name === 'compare'}
         <ComparePage />
       {:else if route.name === 'corners'}
-        <CornersPage sessionId={cornerSession} lap={cornerLap} ref={cornerRef} />
+        <CornersPage
+          sessionId={cornerSession}
+          lap={cornerLap}
+          ref={cornerRef}
+          refSession={cornerRefSession}
+        />
       {:else if route.name === 'stints'}
         <StintsPage sessionId={stintSession} />
       {:else}

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -28,7 +29,13 @@ from fastapi import Path as PathParam
 
 from f126.analysis.compare import LapRef, compare_laps
 from f126.analysis.corners import analyse_corners
-from f126.analysis.resample import AnalysisError, json_floats, json_ints, trace_from_rows
+from f126.analysis.resample import (
+    AnalysisError,
+    json_floats,
+    json_ints,
+    last_of_each_distance,
+    trace_from_rows,
+)
 from f126.analysis.stints import build_stints
 
 # Shares the Phase 1 connection semantics rather than re-implementing them: a psycopg
@@ -53,11 +60,18 @@ LapNumber = Annotated[int, PathParam(ge=0, le=5_000)]
 SessionQuery = Annotated[int, Query(ge=1, le=10**18)]
 LapQuery = Annotated[int, Query(ge=0, le=5_000)]
 CarIndexQuery = Annotated[int | None, Query(ge=0, le=21)]
-#: `best` (the session-best valid lap of the player that has a trace) or a lap number.
-RefQuery = Annotated[str, Query(pattern=r"^(best|[0-9]{1,4})$")]
+#: `best` (the session-best valid lap of the player that has a trace), `track_best` (the
+#: same, widened to every session at this circuit), or a lap number.
+RefQuery = Annotated[str, Query(pattern=r"^(best|track_best|[0-9]{1,4})$")]
+#: Which session `ref` is read from. Defaults to the subject's own session.
+RefSessionQuery = Annotated[int | None, Query(ge=1, le=10**18)]
 
 #: Channels the raw telemetry endpoint emits as integers; the rest go out as floats.
 _INTEGER_CHANNELS: frozenset[str] = frozenset({"gear", "rpm", "drs_or_aero"})
+
+#: Decimal places on the emitted distance axis. Also the resolution at which two samples
+#: count as the same point on track (see `last_of_each_distance`).
+_DISTANCE_DIGITS = 2
 
 
 def analysis_router(db_conn_factory: Callable[[], Any] | None) -> APIRouter:
@@ -81,18 +95,23 @@ def analysis_router(db_conn_factory: Callable[[], Any] | None) -> APIRouter:
             session = _session_or_404(conn, int(session_id))
             car = _resolve_car_index(session, car_index)
             trace = _trace_or_404(conn, int(session_id), lap_number)
+            # The trace is strictly increasing in metres, but the wire format rounds to
+            # centimetres and slow running collapses neighbouring samples onto the same
+            # value. Drop those here, once, so every channel stays index-aligned with a
+            # distance axis that is a genuine function.
+            keep = last_of_each_distance(trace.distance_m, digits=_DISTANCE_DIGITS)
+            distance = trace.distance_m[keep]
             payload: dict[str, Any] = {
                 "session_id": int(session_id),
                 "lap_number": int(lap_number),
                 "car_index": car,
-                "points": len(trace),
-                "distance_m": json_floats(trace.distance_m, digits=2),
+                "points": int(distance.size),
+                "distance_m": json_floats(distance, digits=_DISTANCE_DIGITS),
             }
             for name, values in trace.channels.items():
-                payload[name] = (
-                    json_ints(values) if name in _INTEGER_CHANNELS else json_floats(values)
-                )
-            payload["session_time_s"] = json_floats(trace.session_time_s, digits=4)
+                kept = values[keep]
+                payload[name] = json_ints(kept) if name in _INTEGER_CHANNELS else json_floats(kept)
+            payload["session_time_s"] = json_floats(trace.session_time_s[keep], digits=4)
             return payload
 
         return await _run(db_conn_factory, work)
@@ -121,18 +140,32 @@ def analysis_router(db_conn_factory: Callable[[], Any] | None) -> APIRouter:
         session_id: SessionQuery,
         lap: LapQuery,
         ref: RefQuery = "best",
+        ref_session: RefSessionQuery = None,
     ) -> Any:
         """Corner-by-corner segmentation of one lap against a reference lap.
 
-        `ref=best` picks the session-best valid lap of the player that also has a trace; a
-        number picks that lap. When no reference exists at all the corners still come back,
-        with every reference-derived field `null`.
+        `ref=best` picks the session-best valid lap of the player that also has a trace;
+        `ref=track_best` widens that to every session recorded at the same circuit, which
+        is how a race lap gets measured against the weekend's qualifying benchmark; a
+        number picks that lap. `ref_session` reads `ref` out of another session instead of
+        the subject's own — 422 if that session is at a different circuit.
+
+        The reference is never allowed to resolve to the subject lap itself: that produced
+        an all-zeros comparison that read like a real result. When the subject is the only
+        drawable lap, the corners still come back with every reference-derived field
+        `null` and `self_reference` true, so the client can say so.
         """
 
         def work(conn: Conn) -> Any:
             subject = _lap_ref(conn, session_id, lap)
-            reference = _reference_lap(conn, session_id, subject, ref)
-            return analyse_corners(subject, reference)
+            reference, self_reference = _reference_lap(conn, session_id, subject, ref, ref_session)
+            label = None if reference is None else _session_label(conn, reference.session_id)
+            return analyse_corners(
+                subject,
+                reference,
+                self_reference=self_reference,
+                ref_session_label=label,
+            )
 
         return await _run(db_conn_factory, work)
 
@@ -244,12 +277,79 @@ def _lap_ref(conn: Conn, session_id: int, lap_number: int) -> LapRef:
     )
 
 
-def _reference_lap(conn: Conn, session_id: int, subject: LapRef, ref: str) -> LapRef | None:
-    """Resolve `?ref=` to a lap, or None when the session has nothing to compare against."""
-    if ref != "best":
-        return _lap_ref(conn, session_id, int(ref))
-    car = subject.car_index if subject.car_index is not None else 0
-    best = _queries().best_lap_with_telemetry(conn, session_id, car)
-    if best is None:
+def _is_same_lap(a: LapRef, b: LapRef) -> bool:
+    return a.session_id == b.session_id and a.lap_number == b.lap_number
+
+
+def _session_label(conn: Conn, session_id: int) -> str | None:
+    """`"One-Shot Qualifying - Aug 07"`, for captioning a cross-session reference.
+
+    Built from the row the summary query already returns, so this costs one cached lookup
+    and no schema change.
+    """
+    session = _queries().session_summary(conn, session_id)
+    if session is None:
         return None
-    return _lap_ref(conn, session_id, int(best["lap_number"]))
+    name = session.get("session_type_name") or "Session"
+    started = session.get("started_at_wall")
+    if started is None:
+        return str(name)
+    stamp = datetime.fromtimestamp(float(started), tz=UTC).strftime("%b %d")
+    return f"{name} · {stamp}"
+
+
+def _reference_lap(
+    conn: Conn,
+    session_id: int,
+    subject: LapRef,
+    ref: str,
+    ref_session: int | None = None,
+) -> tuple[LapRef | None, bool]:
+    """Resolve `?ref=` to `(lap, self_reference)`.
+
+    `self_reference` says the subject lap is the only thing there was to compare against.
+    `ref=best` used to resolve to the subject itself on the session's own fastest lap and
+    render a full column of ±0.000s that read like a real, perfectly-matched comparison;
+    automatic resolution now excludes the subject and falls through to the next-best
+    drawable lap, reporting the flag only when there genuinely is no other one.
+
+    An explicit numeric `ref` naming the subject lap is left alone -- asking a lap to be
+    compared with itself is a legitimate identity check -- but it is still flagged, so the
+    client captions it rather than presenting the zeros as a result.
+    """
+    queries = _queries()
+    target = session_id if ref_session is None else ref_session
+
+    if ref == "track_best":
+        track_id = subject.track_id
+        if track_id is None or int(track_id) < 0:
+            # An unknown circuit cannot be matched against other sessions without silently
+            # comparing two different tracks that both lost their Session packet.
+            return None, False
+        best = queries.track_best_lap_with_telemetry(
+            conn,
+            int(track_id),
+            exclude_session_id=subject.session_id,
+            exclude_lap=subject.lap_number,
+        )
+        if best is None:
+            return None, True
+        return _lap_ref(conn, int(best["session_id"]), int(best["lap_number"])), False
+
+    if ref != "best":
+        reference = _lap_ref(conn, target, int(ref))
+        return reference, _is_same_lap(subject, reference)
+
+    # `best` within one session -- the subject's, or an explicitly named other one. Only
+    # exclude the subject lap when searching the session it actually lives in; the same
+    # lap number in a different session is a legitimate reference.
+    session = _session_or_404(conn, target)
+    car = _resolve_car_index(session, None)
+    own_session = target == subject.session_id
+    exclude = subject.lap_number if own_session else None
+    best = queries.best_lap_with_telemetry(conn, target, car, exclude_lap=exclude)
+    if best is None:
+        # Nothing else is drawable. In the session's own case that means the subject is
+        # the only lap with a trace, which is worth saying out loud.
+        return None, own_session
+    return _lap_ref(conn, target, int(best["lap_number"])), False

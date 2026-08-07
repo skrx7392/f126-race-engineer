@@ -19,6 +19,7 @@
   import { LOADING, type Async } from '../lib/analysis.svelte';
   import { formatLapTime, DASH } from '../lib/format';
   import {
+    displayStintRanges,
     fitConfidence,
     formatDegradation,
     formatPercent,
@@ -58,6 +59,15 @@
       });
     return () => controller.abort();
   });
+
+  /**
+   * The lap ranges as headings, with the pit lap attributed to the stint it
+   * started on. Labels only — `chartFor` below still fits against the stored
+   * `lap_start`, because the fit's origin is part of the model, not the caption.
+   */
+  let stintRanges = $derived(
+    stints !== null && stints.status === 'ok' ? displayStintRanges(stints.data.stints) : []
+  );
 
   /**
    * Four series per stint, all describing the same laps with different marks:
@@ -193,7 +203,8 @@
 
       {#snippet children(s)}
         <div class="stints">
-          {#each s.stints as stint (stint.stint_no)}
+          {#each s.stints as stint, i (stint.stint_no)}
+            {@const range = stintRanges[i]}
             {@const chart = chartFor(stint)}
             {@const compound = compoundOf(stint.compound_visual)}
             {@const excluded = exclusions(stint)}
@@ -207,8 +218,7 @@
                     aria-hidden="true">{compound.code}</span
                   >
                   <span class="stint-name">Stint {stint.stint_no}</span>
-                  <span class="label">laps {stint.lap_start}–{stint.lap_end} · {compound.label}</span
-                  >
+                  <span class="label">laps {range.from}–{range.to} · {compound.label}</span>
                 </div>
               </div>
 

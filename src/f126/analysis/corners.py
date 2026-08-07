@@ -224,7 +224,12 @@ def _window_min(values: FloatArray, lo: int, hi: int) -> float:
 
 
 def analyse_corners(
-    subject: LapRef, reference: LapRef | None, *, step_m: float = GRID_STEP_M
+    subject: LapRef,
+    reference: LapRef | None,
+    *,
+    step_m: float = GRID_STEP_M,
+    self_reference: bool = False,
+    ref_session_label: str | None = None,
 ) -> dict[str, Any]:
     """Build the `GET /api/analysis/corners` payload.
 
@@ -232,6 +237,15 @@ def analyse_corners(
     reference lap costs reference columns rather than corners. The reference is resampled
     onto the same grid and is NaN outside its own coverage; every field derived from it is
     `null` there, which is the documented meaning of `null` in this API.
+
+    Because segmentation is anchored to the subject alone and the reference is only ever
+    *read through* the subject's corner windows, corner numbering does not depend on where
+    the reference came from: a reference lap from another session at the same circuit
+    yields the same corners, in the same order, as no reference at all.
+
+    `self_reference` marks the case where the only lap available to compare against was the
+    subject itself. The caller drops the reference rather than emitting a row of ±0 columns
+    that look like a real, perfectly-matched comparison.
 
     Raises:
         AnalysisError: 422 if the reference lap is from a different track, or the subject
@@ -297,6 +311,9 @@ def analyse_corners(
         "session_id": int(subject.session_id),
         "lap_number": int(subject.lap_number),
         "ref_lap_number": None if reference is None else int(reference.lap_number),
+        "ref_session_id": None if reference is None else int(reference.session_id),
+        "ref_session_label": None if reference is None else ref_session_label,
+        "self_reference": bool(self_reference),
         "corners": corners,
         "straights_time_loss_ms": maybe_int(straights),
         "total_delta_ms": maybe_int(total),

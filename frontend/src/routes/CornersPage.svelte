@@ -19,10 +19,15 @@
   import {
     fetchCompare,
     fetchCorners,
+    fetchLaps,
+    fetchSessions,
     type CompareResponse,
     type Corner,
-    type CornersResponse
+    type CornersResponse,
+    type Lap,
+    type SessionSummary
   } from '../lib/analysis-api';
+  import { href, router } from '../lib/router.svelte';
   import { LOADING, analysis, type Async } from '../lib/analysis.svelte';
   import { formatDelta, DASH } from '../lib/format';
   import {
@@ -40,15 +45,93 @@
     sessionId: number | null;
     lap: number | null;
     ref: string;
+    refSession?: number | null;
   }
 
-  let { sessionId, lap, ref }: Props = $props();
+  let { sessionId, lap, ref, refSession = null }: Props = $props();
 
   let corners = $state<Async<CornersResponse> | null>(null);
   let traces = $state<Async<CompareResponse> | null>(null);
   let attempt = $state(0);
   /** Corner-number sort instead of loss sort, for reading the lap in order. */
   let sortByNumber = $state(false);
+
+  /* The reference picker needs the session list (to offer same-circuit sessions)
+     and, once one is chosen, that session's laps. Both are best-effort: the page
+     is still fully usable on the default `ref=best` if either fetch fails. */
+  let sessionList = $state<SessionSummary[]>([]);
+  let refLaps = $state<Lap[]>([]);
+
+  $effect(() => {
+    const controller = new AbortController();
+    fetchSessions(50, controller.signal)
+      .then((data) => {
+        sessionList = data;
+      })
+      .catch(() => {
+        sessionList = [];
+      });
+    return () => controller.abort();
+  });
+
+  let subjectSession = $derived(sessionList.find((s) => s.id === sessionId) ?? null);
+
+  /** Sessions at the same circuit — the only ones a reference lap can come from. */
+  let sameTrackSessions = $derived.by(() => {
+    if (!subjectSession) return sessionList;
+    return sessionList.filter((s) => s.track_id === subjectSession.track_id);
+  });
+
+  /** 'best' | 'track_best' | 'lap' — which of the three modes the URL is asking for. */
+  let refMode = $derived(ref === 'best' || ref === 'track_best' ? ref : 'lap');
+
+  /** The session an explicit lap reference is read from; defaults to the subject's. */
+  let pickedRefSession = $derived(refSession ?? sessionId);
+
+  $effect(() => {
+    const id = pickedRefSession;
+    if (refMode !== 'lap' || id === null) {
+      refLaps = [];
+      return;
+    }
+    const controller = new AbortController();
+    fetchLaps(id, null, controller.signal)
+      .then((data) => {
+        refLaps = data;
+      })
+      .catch(() => {
+        refLaps = [];
+      });
+    return () => controller.abort();
+  });
+
+  /** Narrow an all-cars lap list to the player's, the way the compare page does. */
+  let refLapOptions = $derived.by(() => {
+    const session = sessionList.find((s) => s.id === pickedRefSession) ?? null;
+    const car = session?.player_car_index ?? refLaps[0]?.car_index ?? null;
+    return refLaps.filter((l) => car === null || l.car_index === car);
+  });
+
+  function goRef(nextRef: string, nextRefSession: number | null = null): void {
+    router.go(
+      href('/corners', {
+        session: sessionId,
+        lap,
+        ref: nextRef,
+        ref_session: nextRefSession
+      })
+    );
+  }
+
+  function onModeChange(mode: string): void {
+    if (mode === 'best' || mode === 'track_best') {
+      goRef(mode);
+      return;
+    }
+    // Switching to an explicit lap: start from the subject's own session, lap 1.
+    goRef('1', sessionId);
+  }
+
 
   $effect(() => {
     void attempt;
@@ -60,7 +143,7 @@
     }
     const controller = new AbortController();
     corners = LOADING;
-    fetchCorners(id, l, ref, controller.signal)
+    fetchCorners(id, l, ref, controller.signal, refSession)
       .then((data) => {
         corners = { status: 'ok', data };
       })
@@ -81,9 +164,16 @@
       return;
     }
     const { session_id, lap_number, ref_lap_number } = c.data;
+    if (ref_lap_number === null) {
+      // Nothing to compare against — the table renders its subject-only columns and
+      // there is no second trace to draw.
+      traces = null;
+      return;
+    }
+    const refSession = c.data.ref_session_id ?? session_id;
     const controller = new AbortController();
     traces = LOADING;
-    fetchCompare(session_id, lap_number, session_id, ref_lap_number, controller.signal)
+    fetchCompare(session_id, lap_number, refSession, ref_lap_number, controller.signal)
       .then((data) => {
         traces = { status: 'ok', data };
       })
@@ -95,6 +185,20 @@
   });
 
   let data = $derived(corners?.status === 'ok' ? corners.data : null);
+
+  /** How the active reference reads in the header, e.g. "One-Shot Qualifying · Aug 07 L1". */
+  let refCaption = $derived.by(() => {
+    const d = data;
+    if (!d || d.self_reference || d.ref_lap_number === null) return null;
+    const crossSession =
+      d.ref_session_id !== undefined &&
+      d.ref_session_id !== null &&
+      d.ref_session_id !== d.session_id;
+    if (crossSession) {
+      return `${d.ref_session_label ?? `S${d.ref_session_id}`} L${d.ref_lap_number}`;
+    }
+    return `lap ${d.ref_lap_number}`;
+  });
 
   /** Widest absolute loss, so every bar is drawn on one common scale. */
   let scaleMs = $derived.by(() => {
@@ -129,10 +233,15 @@
   <header class="page-head">
     <div>
       <h1 class="page-title">Corners</h1>
-      {#if data}
+      {#if data && refCaption}
         <p class="page-sub">
-          {lapLabel(data.session_id, data.lap_number)} versus lap {data.ref_lap_number} · positive
-          means slower than the reference through that corner.
+          {lapLabel(data.session_id, data.lap_number)} versus {refCaption} · positive means slower
+          than the reference through that corner.
+        </p>
+      {:else if data}
+        <p class="page-sub">
+          {lapLabel(data.session_id, data.lap_number)} · corner map only, with no reference to
+          measure against.
         </p>
       {:else}
         <p class="page-sub">Select a lap to break its time down corner by corner.</p>
@@ -155,6 +264,59 @@
       </div>
     {/if}
   </header>
+
+  {#if sessionId !== null && lap !== null}
+    <div class="panel ref-picker" data-panel="reference">
+      <label class="picker">
+        <span class="label">Reference</span>
+        <select
+          aria-label="Reference lap source"
+          value={refMode}
+          onchange={(e) => onModeChange(e.currentTarget.value)}
+        >
+          <option value="best">Session best</option>
+          <option value="track_best">Track best · any session here</option>
+          <option value="lap">Specific lap…</option>
+        </select>
+      </label>
+
+      {#if refMode === 'lap'}
+        <label class="picker">
+          <span class="label">From session</span>
+          <select
+            aria-label="Reference session"
+            value={pickedRefSession ?? ''}
+            onchange={(e) => goRef('1', Number(e.currentTarget.value))}
+          >
+            {#each sameTrackSessions as s (s.id)}
+              <option value={s.id}>
+                {s.session_type_name ?? 'Session'} · #{s.id}
+              </option>
+            {/each}
+          </select>
+        </label>
+
+        <label class="picker">
+          <span class="label">Lap</span>
+          <select
+            aria-label="Reference lap"
+            value={ref}
+            onchange={(e) => goRef(e.currentTarget.value, pickedRefSession)}
+          >
+            {#each refLapOptions as l (l.lap_number)}
+              <option value={String(l.lap_number)}>L{l.lap_number}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+
+      {#if data?.self_reference}
+        <p class="ref-note" data-testid="self-reference-note">
+          Only one lap has telemetry — showing the corner map without reference deltas.
+        </p>
+      {/if}
+    </div>
+  {/if}
 
   {#if corners === null}
     <div class="panel idle">
@@ -195,12 +357,19 @@
               </thead>
               <tbody>
                 {#each sorted as corner (corner.n)}
+                  <!-- A self-reference compares a lap with itself, so every delta is
+                       exactly zero. Showing a column of ±0.000 reads like a real,
+                       perfectly-matched result; a dash says "no answer" honestly. -->
                   {@const speedDelta =
-                    corner.min_speed_kmh !== null && corner.ref_min_speed_kmh !== null
+                    !c.self_reference &&
+                    corner.min_speed_kmh !== null &&
+                    corner.ref_min_speed_kmh !== null
                       ? corner.min_speed_kmh - corner.ref_min_speed_kmh
                       : null}
                   {@const brakeDelta =
-                    corner.brake_point_m !== null && corner.ref_brake_point_m !== null
+                    !c.self_reference &&
+                    corner.brake_point_m !== null &&
+                    corner.ref_brake_point_m !== null
                       ? corner.brake_point_m - corner.ref_brake_point_m
                       : null}
                   <tr
@@ -312,6 +481,27 @@
 </section>
 
 <style>
+  .ref-picker {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.75rem 1rem;
+  }
+
+  .picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+
+  .ref-note {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 0.85rem;
+  }
+
   .loss-col {
     width: 40%;
     min-width: 14rem;

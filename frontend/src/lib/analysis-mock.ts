@@ -537,6 +537,19 @@ function bestLapOf(sessionId: number, seed: SessionSeed): number | null {
   return best;
 }
 
+/** The fastest lap by any car — the team-mate is slower, so this is the player's. */
+function fieldBestLapOf(sessionId: number, seed: SessionSeed): number | null {
+  let best: number | null = null;
+  for (const car of [PLAYER_CAR_INDEX, TEAMMATE_CAR_INDEX]) {
+    for (let lap = 1; lap <= seed.laps; lap++) {
+      if (car === PLAYER_CAR_INDEX && INVALID_LAPS.has(lap)) continue;
+      const t = sessionLapTimeMs(sessionId, lap, car);
+      if (best === null || t < best) best = t;
+    }
+  }
+  return best;
+}
+
 function summaryOf(seed: SessionSeed): SessionSummary {
   return {
     id: seed.id,
@@ -557,7 +570,12 @@ function summaryOf(seed: SessionSeed): SessionSummary {
     weather_json: { weather: 0, track_temp_c: 33, air_temp_c: 26, forecast: [] },
     final_classification_json: null,
     raw_file: `/data/raw/session-${seed.id}.f1raw`,
+    // Two cars run every lap, so the all-cars total is twice what the driver
+    // drove — which is exactly why the table shows `player_lap_count` instead.
     lap_count: seed.laps * 2,
+    player_lap_count: seed.laps,
+    segments: 1,
+    field_best_lap_ms: fieldBestLapOf(seed.id, seed),
     player_name: 'YOU',
     // Deliberately present: the list endpoint does not compute this today, but
     // the field is optional in the client type and the table renders it when it
@@ -614,8 +632,14 @@ function stintRowsFor(seed: SessionSeed): TyreStintRow[] {
 export function mockSessionDetail(id: number): SessionDetail | null {
   const seed = seedFor(id);
   if (!seed) return null;
+  // The detail endpoint is a single-row query, not the list's cross-segment
+  // aggregate, so it computes neither of these. Dropping them here keeps the
+  // page's own fallback (count the laps it fetched) on the path dev exercises.
+  const summary = summaryOf(seed);
+  delete summary.player_lap_count;
+  delete summary.segments;
   return {
-    ...summaryOf(seed),
+    ...summary,
     telemetry_sample_count: seed.laps * 1800,
     wear_sample_count: seed.laps * 20,
     event_count: 30 + seed.laps,
@@ -679,6 +703,27 @@ export function mockLaps(sessionId: number, carIndex?: number | null): Lap[] {
 /** The capture rate the contract promises: "rows are already 20 Hz". */
 const SAMPLE_HZ = 20;
 
+/**
+ * The lap whose telemetry carries duplicate distance samples.
+ *
+ * This is the in-lap (`PIT_IN_LAP`): the car crawls to the pit box, so consecutive
+ * samples round to the same distance. Keeping it on one known lap means every other
+ * fixture stays clean and a test can assert both the clean and the degenerate case.
+ */
+export const DUPLICATE_DISTANCE_LAP = PIT_IN_LAP;
+
+/** Repeat a handful of distance values in place, the way a slow crawl does. */
+function injectDuplicateDistances(distance: number[]): void {
+  // Three samples on one value near the pit entry, then a plain pair further along —
+  // both shapes occur in the real capture.
+  const triple = Math.floor(distance.length * 0.82);
+  const pair = Math.floor(distance.length * 0.9);
+  if (triple + 2 >= distance.length || pair + 1 >= distance.length) return;
+  distance[triple + 1] = distance[triple] as number;
+  distance[triple + 2] = distance[triple] as number;
+  distance[pair + 1] = distance[pair] as number;
+}
+
 export function mockTelemetry(
   sessionId: number,
   lap: number,
@@ -722,6 +767,17 @@ export function mockTelemetry(
     const frac = s / BAHRAIN_LENGTH_M;
     drs_or_aero.push((frac > 0.02 && frac < 0.1) || (frac > 0.62 && frac < 0.65) ? 1 : 0);
     session_time_s.push(Math.round((lap * 95 + t) * 100) / 100);
+  }
+
+  // Real captures are NOT strictly monotonic in distance and the UI must not assume it.
+  // The wire format rounds distance, and anywhere the car is crawling — a standing start,
+  // a pit-lane stint, a safety-car train, the overlap left by a flashback — two 20 Hz
+  // samples land on the same value. Session 102's opening lap had one distance repeated
+  // three times and its pit lap eleven such samples. Mock mode reproduces that on the
+  // designated slow lap so the charts are exercised against it, rather than only ever
+  // seeing a textbook-clean axis.
+  if (lap === DUPLICATE_DISTANCE_LAP) {
+    injectDuplicateDistances(distance_m);
   }
 
   const { throttle, brake } = pedalsFromSpeed(speed_kmh);
@@ -858,18 +914,21 @@ export function mockCorners(
 
   // `ref=best` resolves to the session-best valid lap of the player.
   let refLap: number;
-  if (ref === 'best' || ref === '') {
+  if (ref === 'best' || ref === '' || ref === 'track_best') {
+    // Mirrors the backend: the subject lap is excluded from automatic resolution. It used
+    // to be eligible, so asking for corners on the session-best lap resolved the reference
+    // to that same lap and produced a table of ±0.000 that looked like a real result.
     let best: number | null = null;
-    let bestLap = 1;
+    let bestLap: number | null = null;
     for (let l = 1; l <= seed.laps; l++) {
-      if (INVALID_LAPS.has(l)) continue;
+      if (INVALID_LAPS.has(l) || l === lap) continue;
       const t = sessionLapTimeMs(sessionId, l, PLAYER_CAR_INDEX);
       if (best === null || t < best) {
         best = t;
         bestLap = l;
       }
     }
-    refLap = bestLap;
+    refLap = bestLap ?? lap;
   } else {
     const n = Number(ref);
     if (!Number.isFinite(n) || n < 1 || n > seed.laps) {
@@ -989,6 +1048,11 @@ export function mockCorners(
     session_id: sessionId,
     lap_number: lap,
     ref_lap_number: refLap,
+    ref_session_id: sessionId,
+    ref_session_label: null,
+    // Mirrors the backend: a reference that IS the subject lap is an identity check, not
+    // a result. The page captions it instead of presenting the ±0 columns as a comparison.
+    self_reference: refLap === lap,
     corners,
     straights_time_loss_ms: total_delta_ms - cornerLoss,
     total_delta_ms

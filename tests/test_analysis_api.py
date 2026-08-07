@@ -61,6 +61,14 @@ SLOWER_LAP = 7
 SLOWER_BY = 1.02
 PLAYER_CAR = 21
 
+#: A second session at the *same* circuit, derived the same way, so `ref=track_best` and an
+#: explicit `ref_session` have somewhere to point. See `_derive_sibling_sessions`.
+SIBLING_LAP = 1
+SIBLING_FASTER_BY = 0.95
+SIBLING_LAP_MS = 85_000
+#: ...and a third at a different circuit, for the cross-track 422.
+OTHER_TRACK_ID = 7
+
 ANALYSIS_PATHS = (
     "/api/sessions/1/laps/5/telemetry",
     "/api/analysis/compare?session_a=1&lap_a=1&session_b=1&lap_b=2",
@@ -314,6 +322,116 @@ def _derive_slower_lap(url: str, session_id: int) -> None:
         )
 
 
+def _clone_session(
+    conn: Any,
+    source_session_id: int,
+    *,
+    session_uid: str,
+    session_type: int,
+    session_type_name: str,
+    track_id: int | None,
+    track_name: str | None,
+    started_at_wall: float,
+    lap_number: int,
+    lap_time_ms: int,
+    stretch: float,
+) -> int:
+    """Insert a new session carrying one lap cloned off `source_session_id`'s real lap.
+
+    `sessions.id` is an identity column, so the row is inserted and the id read back. The
+    telemetry is the same genuine Bahrain geometry on a scaled clock, which is what makes a
+    cross-session reference meaningful rather than a comparison against noise.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO sessions
+            (session_uid, segment, packet_format, session_type, session_type_name,
+             track_id, track_name, started_at_wall, player_car_index, total_laps)
+        VALUES (%s, 0, 2026, %s, %s, %s, %s, %s, %s, 1)
+        RETURNING id
+        """,
+        (
+            session_uid,
+            session_type,
+            session_type_name,
+            track_id,
+            track_name,
+            started_at_wall,
+            PLAYER_CAR,
+        ),
+    ).fetchone()
+    assert row is not None
+    new_id = int(row[0])
+
+    conn.execute(
+        """
+        INSERT INTO telemetry_samples
+            (session_id, segment, generation, session_time_s, frame_id, overall_frame_id,
+             lap_number, lap_distance_m, speed_kmh, throttle, brake, steer, gear, rpm,
+             drs_or_aero)
+        SELECT %(new_sid)s, t.segment, t.generation,
+               o.t0 + (t.session_time_s - o.t0) * %(stretch)s,
+               t.frame_id, t.overall_frame_id, %(new_lap)s, t.lap_distance_m,
+               t.speed_kmh / %(stretch)s, t.throttle, t.brake, t.steer, t.gear, t.rpm,
+               t.drs_or_aero
+          FROM telemetry_samples t,
+               (SELECT min(session_time_s) AS t0 FROM telemetry_samples
+                 WHERE session_id = %(sid)s AND lap_number = %(lap)s) o
+         WHERE t.session_id = %(sid)s AND t.lap_number = %(lap)s
+        """,
+        {
+            "new_sid": new_id,
+            "sid": source_session_id,
+            "lap": REAL_LAP,
+            "new_lap": lap_number,
+            "stretch": stretch,
+        },
+    )
+    conn.execute(
+        "INSERT INTO laps (session_id, car_index, lap_number, generation, lap_time_ms,"
+        " s1_ms, s2_ms, s3_ms, valid) VALUES (%s, %s, %s, 0, %s, 27000, 37000, 21000, true)",
+        (new_id, PLAYER_CAR, lap_number, lap_time_ms),
+    )
+    return new_id
+
+
+def _derive_sibling_sessions(url: str, session_id: int) -> tuple[int, int]:
+    """A same-track quali session and a different-track one. Returns `(same, other)`."""
+    with psycopg.connect(url, autocommit=True) as conn:
+        track = conn.execute(
+            "SELECT track_id, track_name FROM sessions WHERE id = %s", (session_id,)
+        ).fetchone()
+        assert track is not None
+        track_id, track_name = track
+        same = _clone_session(
+            conn,
+            session_id,
+            session_uid="90000000000000000001",
+            session_type=9,
+            session_type_name="One-Shot Qualifying",
+            track_id=track_id,
+            track_name=track_name,
+            started_at_wall=1_786_000_000.0,
+            lap_number=SIBLING_LAP,
+            lap_time_ms=SIBLING_LAP_MS,
+            stretch=SIBLING_FASTER_BY,
+        )
+        other = _clone_session(
+            conn,
+            session_id,
+            session_uid="90000000000000000002",
+            session_type=9,
+            session_type_name="One-Shot Qualifying",
+            track_id=OTHER_TRACK_ID,
+            track_name="Elsewhere",
+            started_at_wall=1_786_000_100.0,
+            lap_number=SIBLING_LAP,
+            lap_time_ms=SIBLING_LAP_MS,
+            stretch=SIBLING_FASTER_BY,
+        )
+    return same, other
+
+
 @pytest.fixture(scope="module")
 def analysis_db(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     """A Postgres holding the backfilled capture, dropped (or torn down) afterwards."""
@@ -352,6 +470,12 @@ def _session_id(url: str) -> int:
 @pytest.fixture(scope="module")
 def real_session(analysis_db: str) -> int:
     return _session_id(analysis_db)
+
+
+@pytest.fixture(scope="module")
+def sibling_sessions(analysis_db: str, real_session: int) -> tuple[int, int]:
+    """`(same_track_session_id, other_track_session_id)`, created once for the module."""
+    return _derive_sibling_sessions(analysis_db, real_session)
 
 
 @pytest.fixture
@@ -598,3 +722,154 @@ async def test_stints_fall_back_to_the_lap_table_for_a_car_with_no_stint_rows(
 async def test_stints_404_on_an_unknown_session(api: Any, real_session: int) -> None:
     response = await api.get(f"/api/analysis/stints?session_id={real_session + 4242}")
     assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------------------
+# corners: self-reference, and references from another session at the same circuit
+# --------------------------------------------------------------------------------------
+
+
+async def test_corners_ref_best_never_resolves_to_the_subject_lap(
+    api: Any, real_session: int
+) -> None:
+    """Regression: `ref=best` on the session's own best lap self-compared to ±0.000.
+
+    Asking for corners on the fastest lap used to resolve the reference to that same lap
+    and emit a full table of zeros that looked like a real, perfectly-matched comparison.
+    """
+    # SLOWER_LAP is the derived one; REAL_LAP is quicker, so on the subject REAL_LAP the
+    # unfiltered "best" would be REAL_LAP itself.
+    payload = await _get(
+        api, f"/api/analysis/corners?session_id={real_session}&lap={REAL_LAP}&ref=best"
+    )
+    assert payload["ref_lap_number"] != REAL_LAP
+    assert payload["self_reference"] is False
+    assert payload["total_delta_ms"] != 0
+
+
+async def test_corners_flag_an_explicit_self_reference(api: Any, real_session: int) -> None:
+    """An explicit `ref=<subject lap>` is honoured, but labelled for what it is."""
+    payload = await _get(
+        api, f"/api/analysis/corners?session_id={real_session}&lap={REAL_LAP}&ref={REAL_LAP}"
+    )
+    assert payload["ref_lap_number"] == REAL_LAP
+    assert payload["self_reference"] is True
+
+
+async def test_corners_track_best_reaches_across_sessions(
+    api: Any, real_session: int, sibling_sessions: tuple[int, int]
+) -> None:
+    """`ref=track_best` finds the quickest drawable lap at the circuit, in any session."""
+    same, _other = sibling_sessions
+    payload = await _get(
+        api,
+        f"/api/analysis/corners?session_id={real_session}&lap={REAL_LAP}&ref=track_best",
+    )
+    assert payload["ref_session_id"] == same
+    assert payload["ref_lap_number"] == SIBLING_LAP
+    assert payload["self_reference"] is False
+    assert payload["ref_session_label"] is not None
+    assert "One-Shot Qualifying" in payload["ref_session_label"]
+    # The sibling lap is the same geometry on a 5% quicker clock, so the subject loses.
+    assert payload["total_delta_ms"] > 0
+    assert payload["corners"]
+
+
+async def test_corners_track_best_excludes_the_subject_lap(
+    api: Any, sibling_sessions: tuple[int, int]
+) -> None:
+    """The circuit's fastest lap cannot be its own reference."""
+    same, _other = sibling_sessions
+    payload = await _get(
+        api, f"/api/analysis/corners?session_id={same}&lap={SIBLING_LAP}&ref=track_best"
+    )
+    assert not (payload["ref_session_id"] == same and payload["ref_lap_number"] == SIBLING_LAP), (
+        "the subject lap resolved as its own track best"
+    )
+
+
+async def test_corners_ref_session_reads_the_reference_from_another_session(
+    api: Any, real_session: int, sibling_sessions: tuple[int, int]
+) -> None:
+    same, _other = sibling_sessions
+    payload = await _get(
+        api,
+        f"/api/analysis/corners?session_id={real_session}&lap={REAL_LAP}"
+        f"&ref={SIBLING_LAP}&ref_session={same}",
+    )
+    assert payload["ref_session_id"] == same
+    assert payload["ref_lap_number"] == SIBLING_LAP
+    assert payload["self_reference"] is False
+
+
+async def test_corners_ref_session_best_reads_the_other_sessions_best(
+    api: Any, real_session: int, sibling_sessions: tuple[int, int]
+) -> None:
+    """`ref=best&ref_session=` means *that* session's best, not the subject's."""
+    same, _other = sibling_sessions
+    payload = await _get(
+        api,
+        f"/api/analysis/corners?session_id={real_session}&lap={REAL_LAP}"
+        f"&ref=best&ref_session={same}",
+    )
+    assert payload["ref_session_id"] == same
+    assert payload["ref_lap_number"] == SIBLING_LAP
+
+
+async def test_corners_refuse_a_reference_from_another_circuit(
+    api: Any, real_session: int, sibling_sessions: tuple[int, int]
+) -> None:
+    """Mirrors compare's guard: same geometry or nothing."""
+    _same, other = sibling_sessions
+    response = await api.get(
+        f"/api/analysis/corners?session_id={real_session}&lap={REAL_LAP}"
+        f"&ref={SIBLING_LAP}&ref_session={other}"
+    )
+    assert response.status_code == 422
+    assert "different tracks" in response.text
+
+
+async def test_corner_numbering_is_stable_across_reference_sessions(
+    api: Any, real_session: int, sibling_sessions: tuple[int, int]
+) -> None:
+    """Corners are segmented on the SUBJECT lap, so the reference cannot renumber them.
+
+    The guard against a tempting wrong implementation: segmenting both laps and pairing the
+    results would make corner `n` depend on which reference was chosen, and a partial
+    reference lap would silently shift every number after the gap.
+    """
+    same, _other = sibling_sessions
+    base = f"/api/analysis/corners?session_id={real_session}&lap={REAL_LAP}"
+    no_ref = await _get(api, f"{base}&ref={REAL_LAP}")
+    same_session = await _get(api, f"{base}&ref=best")
+    cross_session = await _get(api, f"{base}&ref=track_best")
+
+    geometry = [
+        [(c["n"], c["entry_m"], c["apex_m"], c["exit_m"]) for c in payload["corners"]]
+        for payload in (no_ref, same_session, cross_session)
+    ]
+    assert geometry[0] == geometry[1] == geometry[2], (
+        "corner identity must not depend on where the reference lap came from"
+    )
+    # And the subject-only columns are untouched by the reference too.
+    for payload in (same_session, cross_session):
+        assert [c["min_speed_kmh"] for c in payload["corners"]] == [
+            c["min_speed_kmh"] for c in no_ref["corners"]
+        ]
+
+
+async def test_telemetry_distance_axis_is_strictly_increasing(api: Any, real_session: int) -> None:
+    """The emitted distance array must be a genuine function of distance.
+
+    It is rounded to centimetres on the way out, and slow running (a standing start, a
+    pit-lane crawl) puts two 20 Hz samples inside the same centimetre. Charts key and
+    bisect on this axis, so duplicates are not cosmetic.
+    """
+    payload = await _get(api, f"/api/sessions/{real_session}/laps/{REAL_LAP}/telemetry")
+    distance = payload["distance_m"]
+    assert distance == sorted(distance)
+    assert len(set(distance)) == len(distance), "duplicate distance samples reached the wire"
+    assert payload["points"] == len(distance)
+    for name, values in payload.items():
+        if isinstance(values, list):
+            assert len(values) == len(distance), f"channel {name} is not index-aligned"

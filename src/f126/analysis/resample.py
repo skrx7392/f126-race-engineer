@@ -275,6 +275,29 @@ def json_floats(values: FloatArray, *, digits: int = 3) -> list[float | None]:
     return [None if not np.isfinite(v) else float(v) for v in rounded]
 
 
+def last_of_each_distance(distance: FloatArray, *, digits: int = 2) -> BoolArray:
+    """Mask keeping one sample per *rounded* distance -- the last of each run.
+
+    `LapTrace` is already strictly increasing in distance, but the wire format rounds:
+    at 20 Hz a car doing 5 km/h covers ~7 cm per sample, so two neighbouring samples
+    round to the same centimetre and the emitted array stops being strictly monotonic
+    even though the underlying floats were fine. Real race data hits this constantly --
+    the standing start and the pit-lane crawl -- and a non-monotonic x-axis is invalid
+    input for the charts, which key and bisect on distance.
+
+    The *later* sample of a duplicated pair is the one kept: it is the more recent
+    observation of the car at that point on track, and keeping it means the retained
+    sample's session time is the larger one, so the time axis stays monotonic too.
+    """
+    if distance.size == 0:
+        return np.zeros(0, dtype=np.bool_)
+    rounded = np.round(distance, digits)
+    mask = np.empty(rounded.size, dtype=np.bool_)
+    mask[:-1] = rounded[:-1] != rounded[1:]
+    mask[-1] = True
+    return mask
+
+
 def json_ints(values: FloatArray) -> list[int | None]:
     """Array -> JSON list of ints, with every non-finite value becoming `null`."""
     return [None if not np.isfinite(v) else int(round(float(v))) for v in values]

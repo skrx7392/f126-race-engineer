@@ -66,9 +66,7 @@
                 <th scope="col">Date</th>
                 <th scope="col">Track</th>
                 <th scope="col">Type</th>
-                <th scope="col" class="num" title="Lap records stored, counted across every car">
-                  Laps
-                </th>
+                <th scope="col" class="num" title="Laps you drove in this session">Laps</th>
                 <th scope="col" class="num">Best lap</th>
               </tr>
             </thead>
@@ -82,7 +80,17 @@
                   </td>
                   <td class="track">{session.track_name ?? DASH}</td>
                   <td class="type">{session.session_type_name ?? DASH}</td>
-                  <td class="num">{session.lap_count}</td>
+                  <!--
+                    Your laps, not the database's. `lap_count` counts every car
+                    on the grid, so a 13-lap race reads "267" — a true number
+                    about the archive and a wrong answer to the question the
+                    column asks. The all-cars total stays reachable in the
+                    tooltip; `lap_count` is only rendered when an older backend
+                    does not send the player's own count.
+                  -->
+                  <td class="num" title="{session.lap_count} lap records across all cars">
+                    {session.player_lap_count ?? session.lap_count}
+                  </td>
                   <!--
                     `best_lap_ms` is computed by the detail endpoint, not the
                     list one. Rather than firing a detail request per row, the

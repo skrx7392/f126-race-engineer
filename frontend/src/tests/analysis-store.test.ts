@@ -222,10 +222,13 @@ describe('URL reconciliation', () => {
     expect(store.cornersHref()).toBe('#/corners?session=3&lap=12&ref=9');
   });
 
-  it('falls back to the session best when B is from another session', () => {
+  it('carries B across as a cross-session reference instead of dropping it', () => {
+    // The corners endpoint takes `ref_session`, so crossing over from a cross-session
+    // comparison keeps the reference. It used to be silently replaced with `best`, which
+    // quietly answered a different question than the one the user had set up.
     store.setA(lap(3, 12));
     store.setB(lap(4, 9));
-    expect(store.cornersHref()).toBe('#/corners?session=3&lap=12&ref=best');
+    expect(store.cornersHref()).toBe('#/corners?session=3&lap=12&ref=9&ref_session=4');
   });
 
   it('round-trips a selection through its own link', () => {

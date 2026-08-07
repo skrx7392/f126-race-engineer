@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
@@ -137,17 +138,26 @@ class SpaStaticFiles(StaticFiles):
 
     async def get_response(self, path: str, scope: Scope) -> Response:
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
             if exc.status_code != 404 or path == "index.html":
                 raise
             try:
-                return await super().get_response("index.html", scope)
+                response = await super().get_response("index.html", scope)
+                path = "index.html"
             except StarletteHTTPException:
                 # A static dir with no index.html: the build is half-there.
                 if path in ("", "."):
                     return HTMLResponse(FALLBACK_HTML)
                 raise exc from None
+        # Without an explicit policy, browsers heuristically cache index.html and
+        # keep loading a stale bundle after every deploy. The split: entry points
+        # revalidate every load; hashed assets are immutable by construction.
+        if path.startswith("assets/"):
+            response.headers.setdefault("cache-control", "public, max-age=31536000, immutable")
+        else:
+            response.headers["cache-control"] = "no-cache"
+        return response
 
 
 def create_app(
@@ -243,9 +253,11 @@ def _api_router(db_conn_factory: Callable[[], Any] | None) -> APIRouter:
     @router.get("/sessions", response_model=None)
     async def list_sessions(
         limit: Annotated[int, Query(ge=1, le=500)] = 50,
+        include_empty: Annotated[bool, Query()] = False,
     ) -> Any:
-        """Most recent sessions, newest first."""
-        return await _query(db_conn_factory, "sessions", limit)
+        """Most recent sessions, newest first. Zero-lap menu stubs are hidden
+        unless include_empty is set."""
+        return await _query(db_conn_factory, "sessions", limit, include_empty=include_empty)
 
     @router.get("/sessions/{session_id}", response_model=None)
     async def get_session(session_id: SessionId) -> Any:
@@ -273,7 +285,9 @@ def _api_router(db_conn_factory: Callable[[], Any] | None) -> APIRouter:
     return router
 
 
-async def _query(factory: Callable[[], Any] | None, helper: str, *args: Any) -> Any:
+async def _query(
+    factory: Callable[[], Any] | None, helper: str, *args: Any, **kwargs: Any
+) -> Any:
     """Run one `store.queries` helper off the event loop.
 
     Every failure mode collapses to 503 `database unavailable`: no DB
@@ -297,14 +311,18 @@ async def _query(factory: Callable[[], Any] | None, helper: str, *args: Any) -> 
         raise HTTPException(status_code=503, detail=_DB_UNAVAILABLE)
 
     try:
-        return await asyncio.to_thread(_call_with_connection, factory, fn, *args)
+        return await asyncio.to_thread(
+            functools.partial(_call_with_connection, factory, fn, *args, **kwargs)
+        )
     except Exception:
         log.exception("query %s failed", helper)
         raise HTTPException(status_code=503, detail=_DB_UNAVAILABLE) from None
 
 
-def _call_with_connection(factory: Callable[[], Any], fn: Callable[..., Any], *args: Any) -> Any:
-    """Acquire a connection, run `fn(conn, *args)`, release it. Runs in a thread.
+def _call_with_connection(
+    factory: Callable[[], Any], fn: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    """Acquire a connection, run `fn(conn, *args, **kwargs)`, release it. Runs in a thread.
 
     psycopg connections and pool handles are both context managers, and entering
     them is what commits/returns/closes; a factory that hands back something
@@ -313,8 +331,8 @@ def _call_with_connection(factory: Callable[[], Any], fn: Callable[..., Any], *a
     handle = factory()
     if hasattr(handle, "__enter__"):
         with handle as conn:
-            return fn(conn if conn is not None else handle, *args)
-    return fn(handle, *args)
+            return fn(conn if conn is not None else handle, *args, **kwargs)
+    return fn(handle, *args, **kwargs)
 
 
 # ---- static frontend ----------------------------------------------------

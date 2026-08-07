@@ -78,23 +78,27 @@ _MS_PER_MINUTE = 60_000
 class Extras2026:
     """2026-only values that reach ``TelemetryView`` from *other* packets.
 
-    ``aero_mode`` arrives on CarTelemetry2 (id 16); the energy pair arrives on
-    CarStatus (id 7), which ``types.py`` routes into ``TelemetryView`` for 2026
-    (``StatusView.ers_*`` is ``None`` there). All three stay ``None`` until the
+    ``aero_mode`` arrives on CarTelemetry2 (id 16); the energy quartet arrives
+    on CarStatus (id 7), which ``types.py`` routes into ``TelemetryView`` for
+    2026 (``StatusView.ers_*`` is ``None`` there). All stay ``None`` until the
     corresponding packet has been seen at least once in the current session.
     """
 
     aero_mode: int | None = None
     energy_store_j: float | None = None
     energy_deploy_mode: int | None = None
+    energy_harvested_lap_j: float | None = None
+    energy_deployed_lap_j: float | None = None
 
 
 class StatusResult(NamedTuple):
-    """``decode_status`` output plus the raw energy pair for the 2026 cache."""
+    """``decode_status`` output plus the raw energy values for the 2026 cache."""
 
     view: StatusView
     ers_store_j: float
     ers_deploy_mode: int
+    ers_harvested_lap_j: float
+    ers_deployed_lap_j: float
 
 
 @dataclass(slots=True)
@@ -488,6 +492,8 @@ def decode_telemetry(
         opponent_speeds_kmh=[float(speed) for speed in speeds],
         energy_store_j=extras.energy_store_j if is_2026 else None,
         energy_deploy_mode=extras.energy_deploy_mode if is_2026 else None,
+        energy_harvested_lap_j=extras.energy_harvested_lap_j if is_2026 else None,
+        energy_deployed_lap_j=extras.energy_deployed_lap_j if is_2026 else None,
     )
 
 
@@ -515,6 +521,7 @@ def decode_status(spec: FormatSpec, data: bytes, header: PacketHeader) -> Status
         values[idx["ers_harvested_this_lap_mguk"]]
         + values[idx["ers_harvested_this_lap_mguh"]]
     )
+    deployed = values[idx["ers_deployed_this_lap"]]
     fia_flags = values[idx["vehicle_fia_flags"]]
     is_2026 = spec.packet_format == 2026
 
@@ -529,11 +536,17 @@ def decode_status(spec: FormatSpec, data: bytes, header: PacketHeader) -> Status
         ers_store_j=None if is_2026 else ers_store_j,
         ers_deploy_mode=None if is_2026 else ers_deploy_mode,
         ers_harvested_lap_j=None if is_2026 else harvested,
-        ers_deployed_lap_j=None if is_2026 else values[idx["ers_deployed_this_lap"]],
+        ers_deployed_lap_j=None if is_2026 else deployed,
         drs_allowed=bool(values[idx["drs_allowed"]]),
         vehicle_fia_flags=fia_flags,
     )
-    return StatusResult(view=view, ers_store_j=ers_store_j, ers_deploy_mode=ers_deploy_mode)
+    return StatusResult(
+        view=view,
+        ers_store_j=ers_store_j,
+        ers_deploy_mode=ers_deploy_mode,
+        ers_harvested_lap_j=harvested,
+        ers_deployed_lap_j=deployed,
+    )
 
 
 # --------------------------------------------------------------------------

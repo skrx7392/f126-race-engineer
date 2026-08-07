@@ -47,3 +47,56 @@ Reversals welcome — flag anything and I'll adjust.
     names — with placeholders across every blob and commit message. Force-pushed with the
     branch protection ruleset lifted for the push and restored immediately after. All 18
     commits re-hashed; working tree and test suite unaffected.
+
+## 2026-08-07 — first real race (Jeddah, 13 laps, format 2026)
+
+11. **Menu packets no longer wipe the parser's 2026 merge cache.** `PacketParser` reset its
+    `Extras2026` cache on any `session_uid` change, including the `uid 0` packets menus and
+    loading screens emit — the same packets the session lifecycle already ignores outright
+    (decision 7). After any menu bounce, every CarTelemetry decoded before the next CarStatus
+    carried `energy_store_j=None`, so the pit-wall energy panel went dark and stayed dark.
+    The cache now ignores `uid 0` exactly as the tracker does; a genuine session change still
+    clears it. Measured on the Jeddah capture: 230 menu packets, 9 uid flips.
+
+12. **2026 per-lap harvest/deploy energy now reaches the slow frame.** `decode_status` nulls
+    the ERS fields on 2026 (the energy model lives on `TelemetryView` there) but only the
+    store and deploy mode were forwarded through the merge cache — `harvested_lap_j` and
+    `deployed_lap_j` were therefore `None` in *100%* of slow frames on a 2026 session. Both
+    are now carried across with the other two. Verified against the race capture: 100% null
+    before, 2% after (the 25 s before the first CarStatus, same as every other energy field).
+
+13. **Tyre age is the game's own counter, not a stint-derived one.** Measured on the race
+    capture, `CarStatus.tyre_age_laps` is *laps completed on the set*: 0 for the whole lap
+    the tyres are fitted on, 7 while lap 13 runs on a set fitted during lap 6. It is passed
+    through unmodified — recomputing it would put the dashboard out of step with the number
+    the game shows the driver. The apparent off-by-one was the *stint strip*, not the age.
+
+14. **A pit lap belongs to the stint it started on.** The in-lap is driven on the old set and
+    the out-lap on the new one, so a raw `lap_start`/`lap_end` pair shares its boundary lap
+    with the previous stint: "Soft 1–6 | Medium 6–13" counted lap 6 twice and implied an
+    8-lap stint on a set that had 7 laps on it. Ranges are now normalised for display only
+    (`displayStintRanges`) so they are contiguous and non-overlapping — "Soft 1–6 | Medium
+    7–13" — and the counts agree with the tyre age. Stored data and the degradation fit are
+    unchanged; this is a presentation convention, applied in both render sites.
+
+15. **The telemetry endpoint emits a strictly-increasing distance axis.** The trace is already
+    monotonic in float metres, but the wire format rounds to centimetres and slow running
+    (standing start, pit-lane crawl, safety car) collapses neighbouring 20 Hz samples onto one
+    value — real race laps carried up to 11 such duplicates. Duplicates are dropped after
+    rounding, keeping the later sample of each pair. Charts bisect and key on this axis, so a
+    non-monotonic one is invalid input, not a cosmetic wrinkle.
+
+16. **Corner references never silently resolve to the subject lap**, and can now come from
+    another session at the same circuit (`ref=track_best`, `ref_session=`). `ref=best` on a
+    session's own fastest lap used to return that lap and render a full table of ±0.000 that
+    read like a real result; automatic resolution now excludes the subject and reports
+    `self_reference` when there is genuinely nothing else. Corner numbering is anchored to the
+    subject lap alone — the reference is read through the subject's windows, never segmented
+    itself — so corner `n` is stable across reference sessions. Additive response fields only.
+
+17. **Keyed `{#each}` blocks over server data are keyed by index.** The chart legend was keyed
+    on the series label, and two series share a label whenever a lap is charted against itself
+    (`"S102 L3"` twice, and each pedal label twice over) — Svelte threw `each_key_duplicate`
+    and took the whole trace pane down. Series are a fixed-length positional array, so the
+    index *is* the identity. Same fix for the weather forecast strip, keyed on `offset_min`,
+    which the game can repeat.

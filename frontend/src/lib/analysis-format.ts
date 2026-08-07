@@ -99,6 +99,68 @@ export function fitConfidence(r2: number | null | undefined): 'strong' | 'fair' 
   return 'weak';
 }
 
+// ── stint lap ranges ─────────────────────────────────────────────────────────
+
+/** One stint's lap range as it is displayed. */
+export interface StintRange {
+  /** First lap attributed to the stint. */
+  from: number;
+  /** Last lap attributed to the stint. Never earlier than `from`. */
+  to: number;
+  /** Laps the displayed range covers: `to - from + 1`. */
+  laps: number;
+}
+
+/** The bounds every stint shape carries, whichever endpoint it came from. */
+interface StintBounds {
+  lap_start: number | null;
+  lap_end: number | null;
+}
+
+/**
+ * Stint lap ranges for display, with the pit lap counted exactly once.
+ *
+ * A pit stop happens *during* a lap: that lap is the in-lap for the set coming
+ * off and the out-lap for the set going on, so the recorder honestly stores it
+ * as both the end of one stint and the start of the next. Rendered literally
+ * the strip reads "Soft 1–6 · Medium 6–12": lap 6 appears twice, the widths
+ * overlap, and the stint lengths add up to one more than the laps actually run.
+ *
+ * The convention adopted here is that **the pit lap belongs to the stint it
+ * started on** — you drove that lap on the old tyres and only crossed the line
+ * on the new ones. So a stint that begins on the lap the previous one ended is
+ * displayed from `previous.lap_end + 1`, giving contiguous, non-overlapping
+ * ranges whose lengths sum to the race distance.
+ *
+ * This is display normalisation only. The stored and returned data keeps the
+ * shared boundary, and the degradation fits still work from the real
+ * `lap_start` — moving a model's origin to make a label tidier would change the
+ * numbers the model reports.
+ *
+ * @param stints  Stints in order, as the API returned them.
+ * @param lastLap Fallback for an open-ended final stint (`lap_end` null).
+ */
+export function displayStintRanges(
+  stints: readonly StintBounds[],
+  lastLap?: number | null
+): StintRange[] {
+  const ranges: StintRange[] = [];
+  let previousEnd: number | null = null;
+
+  for (const stint of stints) {
+    const rawFrom = stint.lap_start ?? (previousEnd === null ? 1 : previousEnd + 1);
+    const rawTo = stint.lap_end ?? lastLap ?? rawFrom;
+    // `<=` rather than `===`: a stop that straddles more than one lap boundary
+    // should still land after the previous stint, not inside it.
+    const from = previousEnd !== null && rawFrom <= previousEnd ? previousEnd + 1 : rawFrom;
+    const to = Math.max(from, rawTo);
+    ranges.push({ from, to, laps: to - from + 1 });
+    previousEnd = to;
+  }
+
+  return ranges;
+}
+
 /** Corner kind as the table renders it. */
 export const CORNER_KIND_LABEL: Record<string, string> = {
   slow: 'Slow',

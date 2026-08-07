@@ -36,7 +36,9 @@
     </div>
 
     <div class="forecast">
-      {#each forecast as sample (sample.offset_min)}
+      <!-- Keyed by index: offset_min is raw game data and the forecast can carry two
+           samples at the same offset (one per session type), which is a duplicate key. -->
+      {#each forecast as sample, i (i)}
         {@const w = weatherOf(sample.weather)}
         <div class="chip" class:wet={isWet(sample.weather)}>
           <span class="when label">+{sample.offset_min}m</span>

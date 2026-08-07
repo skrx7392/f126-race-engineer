@@ -290,7 +290,15 @@
 
   {#if showLegend}
     <ul class="legend">
-      {#each series as spec, i (spec.label ?? i)}
+      <!--
+        Keyed by index, not by label. Two series legitimately share a label whenever a lap
+        is charted against itself — corners on the session-best lap resolves the reference
+        to that same lap, so both traces are "S102 L3" and the pedals pane repeats
+        "S102 L3 throttle" twice. Keying on the label crashed the whole pane with
+        each_key_duplicate. Series are a fixed-length positional array here (index 0 is
+        always the x axis), so the index IS the stable identity.
+      -->
+      {#each series as spec, i (i)}
         {#if i > 0 && !spec.legendHidden}
           <li>
             <span

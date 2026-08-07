@@ -1031,3 +1031,71 @@ def test_session_segment_reset_clears_live_state() -> None:
     assert slow["tower"] == []
     assert slow["sectors"]["session_best"] == [None, None, None]
     assert sim.live.reference_lap_ms is None
+
+
+# --------------------------------------------------------------------------
+# 2026 energy, end to end (synthetic wire bytes -> parser -> get_slow)
+# --------------------------------------------------------------------------
+
+
+def test_2026_energy_reaches_get_slow_from_real_wire_bytes() -> None:
+    """Regression: the 2026 energy panel went dark for a whole race.
+
+    Two independent faults produced the same "-" on the pit wall, so this walks
+    the real path -- synthetic 2026 datagrams through ``PacketParser`` and the
+    wired state bundle -- rather than hand-building views:
+
+      1. the per-lap harvest/deploy pair was decoded on CarStatus, nulled for
+         2026, and never forwarded to ``TelemetryView``, so it was ``None`` in
+         100% of slow frames on a 2026 session;
+      2. menu traffic (sessionUID 0) reset the parser's merge cache, blanking
+         ``energy_store_j`` until the next CarStatus.
+    """
+    from builders import build_car_status, build_car_telemetry, build_session
+
+    from f126.parser import PacketParser
+    from f126.state import build_state
+
+    uid = 0xF126_0BADC0DE
+    parser = PacketParser()
+    bundle = build_state(Config())
+
+    def feed(payload: bytes) -> None:
+        packet = parser.parse(payload, 1_000, 2_000)
+        if packet is not None:
+            bundle.feed(packet)
+
+    feed(build_session(2026, session_uid=uid, head={"session_type": 15, "total_laps": 13}))
+    feed(
+        build_car_status(
+            2026,
+            session_uid=uid,
+            cars={
+                0: {
+                    "ers_store_energy": 3_000_000.0,
+                    "ers_deploy_mode": 2,
+                    "ers_harvested_this_lap_mguk": 700_000.0,
+                    "ers_harvested_this_lap_mguh": 300_000.0,
+                    "ers_deployed_this_lap": 1_800_000.0,
+                }
+            },
+        )
+    )
+    feed(build_car_telemetry(2026, session_uid=uid, cars={0: {"speed": 288}}))
+
+    energy = bundle.live.get_slow()["energy"]
+    assert energy["store_j"] == pytest.approx(3_000_000.0)
+    assert energy["store_pct"] == pytest.approx(75.0)
+    assert energy["deploy_mode"] == 2
+    assert energy["harvested_lap_j"] == pytest.approx(1_000_000.0)
+    assert energy["deployed_lap_j"] == pytest.approx(1_800_000.0)
+
+    # A menu bounce must not blank any of it.
+    feed(build_car_telemetry(2026, session_uid=0, cars={0: {"speed": 0}}))
+    feed(build_car_telemetry(2026, session_uid=uid, cars={0: {"speed": 291}}))
+
+    after_menu = bundle.live.get_slow()["energy"]
+    assert after_menu["store_j"] == pytest.approx(3_000_000.0)
+    assert after_menu["deploy_mode"] == 2
+    assert after_menu["harvested_lap_j"] == pytest.approx(1_000_000.0)
+    assert after_menu["deployed_lap_j"] == pytest.approx(1_800_000.0)

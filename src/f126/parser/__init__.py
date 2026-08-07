@@ -150,7 +150,14 @@ class PacketParser:
             self._error(packet_id, "size_mismatch")
             return None
 
-        if self._session_uid != header.session_uid:
+        # Menus and loading screens emit packets with sessionUID 0. They are not
+        # a session (the lifecycle in state/session.py ignores them outright), so
+        # they must not invalidate the merge cache either: bouncing through a
+        # pause menu mid-race used to wipe the 2026 energy pair, and every
+        # CarTelemetry decoded before the next CarStatus then carried
+        # energy_store_j=None -- which is what left the pit-wall energy panel
+        # reading "-" for the rest of the session.
+        if header.session_uid != 0 and self._session_uid != header.session_uid:
             self._session_uid = header.session_uid
             self._extras = Extras2026()
 
@@ -188,6 +195,8 @@ class PacketParser:
                 if spec.packet_format == 2026:
                     self._extras.energy_store_j = result.ers_store_j
                     self._extras.energy_deploy_mode = result.ers_deploy_mode
+                    self._extras.energy_harvested_lap_j = result.ers_harvested_lap_j
+                    self._extras.energy_deployed_lap_j = result.ers_deployed_lap_j
                 return result.view
             case PacketId.FINAL_CLASSIFICATION:
                 return decode_classification(spec, data, header)

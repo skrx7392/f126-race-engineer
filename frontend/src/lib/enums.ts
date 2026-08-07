@@ -9,6 +9,8 @@
  * channel carrying identity.
  */
 
+import { DASH } from './format';
+
 // ── tyre compounds ───────────────────────────────────────────────────────────
 
 export interface Compound {
@@ -25,7 +27,21 @@ const MEDIUM: Compound = { code: 'M', label: 'Medium', color: '#FFD12E', ink: '#
 const HARD: Compound = { code: 'H', label: 'Hard', color: '#EDEDE6', ink: '#14150F' };
 const INTER: Compound = { code: 'I', label: 'Intermediate', color: '#3FB618', ink: '#0B1004' };
 const WET: Compound = { code: 'W', label: 'Wet', color: '#1E7FD4', ink: '#FFFFFF' };
-const UNKNOWN_COMPOUND: Compound = { code: '?', label: 'Unknown', color: '#4A515C', ink: '#F2F4F7' };
+/*
+ * Unknown is an em dash, not a question mark.
+ *
+ * The game only broadcasts the player's compound, so every other car on the
+ * timing tower is legitimately unknown — twenty-one of them. A "?" reads as
+ * twenty-one errors; the em dash is the same "no value here" glyph the rest of
+ * the UI already uses (format.ts), so it reads as absent. `label` stays
+ * "Unknown" because that is what the `title` should say when someone asks.
+ */
+const UNKNOWN_COMPOUND: Compound = {
+  code: DASH,
+  label: 'Unknown',
+  color: '#4A515C',
+  ink: '#F2F4F7'
+};
 
 /** `compound_visual` — what the broadcast graphic shows. */
 const VISUAL_COMPOUNDS: Record<number, Compound> = {
@@ -57,6 +73,17 @@ const ACTUAL_COMPOUND_NAMES: Record<number, string> = {
 export function compoundOf(visual: number | null | undefined): Compound {
   if (visual == null) return UNKNOWN_COMPOUND;
   return VISUAL_COMPOUNDS[visual] ?? UNKNOWN_COMPOUND;
+}
+
+/**
+ * Whether `compoundOf` found a real compound or fell back to the placeholder.
+ *
+ * Callers that draw a pill use this to decide how loud the unknown case should
+ * be: the tyre panel has one pill and wants a visible marker, the timing tower
+ * has twenty-two and wants the unknown ones to disappear.
+ */
+export function isKnownCompound(visual: number | null | undefined): boolean {
+  return visual != null && VISUAL_COMPOUNDS[visual] !== undefined;
 }
 
 export function actualCompoundName(actual: number | null | undefined): string | null {

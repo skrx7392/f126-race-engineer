@@ -19,7 +19,16 @@
    *    the chip is a redundant accent for people who read the grid by colour.
    */
   import type { TowerEntry } from '../lib/protocol';
-  import { compoundOf, teamColor, teamName, pitState, PIT_LABEL, isOut, resultLabel } from '../lib/enums';
+  import {
+    compoundOf,
+    isKnownCompound,
+    teamColor,
+    teamName,
+    pitState,
+    PIT_LABEL,
+    isOut,
+    resultLabel
+  } from '../lib/enums';
   import { formatGap, formatLapTime, DASH } from '../lib/format';
 
   interface Props {
@@ -51,6 +60,7 @@
   <div class="rows">
     {#each tower as row, i (row.car_index)}
       {@const compound = compoundOf(row.compound_visual)}
+      {@const knownCompound = isKnownCompound(row.compound_visual)}
       {@const pit = pitState(row.pit_status)}
       {@const out = isOut(row.result_status)}
       <div
@@ -66,9 +76,20 @@
         <span class="gap clock">{i === 0 ? 'Leader' : formatGap(row.gap_ahead_ms)}</span>
         <span class="last clock">{formatLapTime(row.last_lap_ms)}</span>
         <span class="tyre">
+          <!--
+            The compound of a car that is not ours is not broadcast, so it is
+            unknown for twenty-one of the twenty-two rows. A filled chip on
+            every one of them would be a column of identical placeholders
+            shouting for attention; unknown therefore drops its disc entirely
+            and sits in the dimmest ink, which reads as "nothing to say here".
+            The title still spells it out for anyone who hovers.
+          -->
           <span
             class="compound"
-            style="background: {compound.color}; color: {compound.ink}"
+            class:unknown={!knownCompound}
+            style={knownCompound
+              ? `background: ${compound.color}; color: ${compound.ink}`
+              : undefined}
             title={compound.label}>{compound.code}</span
           >
           <span class="age">{row.tyre_age_laps ?? DASH}</span>
@@ -182,6 +203,14 @@
     font-size: 0.7rem;
     font-weight: 800;
     flex: none;
+  }
+
+  /* No disc, no fill, no weight: an unknown compound is absent, not an error. */
+  .compound.unknown {
+    background: none;
+    color: var(--ink-3);
+    font-weight: 500;
+    opacity: 0.7;
   }
 
   .age {

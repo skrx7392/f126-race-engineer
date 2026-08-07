@@ -10,7 +10,13 @@ from __future__ import annotations
 import struct
 
 import pytest
-from builders import BUILDERS, build_car_telemetry, build_event, build_motion
+from builders import (
+    BUILDERS,
+    build_car_status,
+    build_car_telemetry,
+    build_event,
+    build_motion,
+)
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -379,3 +385,90 @@ def test_parsed_packet_carries_receive_timestamps(parser: PacketParser) -> None:
     assert packet is not None
     assert packet.recv_monotonic_ns == 111
     assert packet.recv_wall_ns == 222
+
+
+# --------------------------------------------------------------------------
+# 2026 energy merge cache
+# --------------------------------------------------------------------------
+
+
+ENERGY_STATUS = {
+    "ers_store_energy": 3_500_000.0,
+    "ers_deploy_mode": 3,
+    "ers_harvested_this_lap_mguk": 900_000.0,
+    "ers_harvested_this_lap_mguh": 100_000.0,
+    "ers_deployed_this_lap": 2_400_000.0,
+}
+
+
+def test_2026_energy_reaches_telemetry_view_via_the_merge_cache(
+    parser: PacketParser,
+) -> None:
+    """CarStatus (id 7) feeds the whole 2026 energy quartet onto TelemetryView."""
+    parser.parse(
+        build_car_status(2026, player_car_index=0, cars={0: ENERGY_STATUS}),
+        RECV_MONO,
+        RECV_WALL,
+    )
+    packet = parser.parse(
+        build_car_telemetry(2026, player_car_index=0, cars={0: {"speed": 300}}),
+        RECV_MONO,
+        RECV_WALL,
+    )
+    assert packet is not None
+    view = packet.view
+    assert view.energy_store_j == pytest.approx(3_500_000.0)
+    assert view.energy_deploy_mode == 3
+    # Harvest is the MGU-K + MGU-H sum, matching the 2025 StatusView convention.
+    assert view.energy_harvested_lap_j == pytest.approx(1_000_000.0)
+    assert view.energy_deployed_lap_j == pytest.approx(2_400_000.0)
+
+
+def test_menu_packets_do_not_wipe_the_2026_merge_cache(parser: PacketParser) -> None:
+    """A pause-menu bounce (sessionUID 0) must not blank the energy readouts.
+
+    Menus emit sessionUID 0; the lifecycle in state/session.py ignores those
+    packets outright. The merge cache has to agree, otherwise every
+    CarTelemetry decoded between the menu and the next CarStatus carries
+    energy_store_j=None and the pit-wall energy panel goes dark.
+    """
+    real_uid = 0xF126_0BADC0DE
+    parser.parse(
+        build_car_status(2026, session_uid=real_uid, player_car_index=0, cars={0: ENERGY_STATUS}),
+        RECV_MONO,
+        RECV_WALL,
+    )
+    # A burst of menu traffic on uid 0, then straight back to the session.
+    for _ in range(5):
+        parser.parse(
+            build_car_telemetry(2026, session_uid=0, player_car_index=0, cars={0: {"speed": 0}}),
+            RECV_MONO,
+            RECV_WALL,
+        )
+    packet = parser.parse(
+        build_car_telemetry(
+            2026, session_uid=real_uid, player_car_index=0, cars={0: {"speed": 300}}
+        ),
+        RECV_MONO,
+        RECV_WALL,
+    )
+    assert packet is not None
+    assert packet.view.energy_store_j == pytest.approx(3_500_000.0)
+    assert packet.view.energy_deploy_mode == 3
+
+
+def test_a_real_session_change_still_clears_the_merge_cache(parser: PacketParser) -> None:
+    """Only uid 0 is exempt -- a genuine new session must start from nothing."""
+    parser.parse(
+        build_car_status(2026, session_uid=1111, player_car_index=0, cars={0: ENERGY_STATUS}),
+        RECV_MONO,
+        RECV_WALL,
+    )
+    packet = parser.parse(
+        build_car_telemetry(2026, session_uid=2222, player_car_index=0, cars={0: {"speed": 300}}),
+        RECV_MONO,
+        RECV_WALL,
+    )
+    assert packet is not None
+    assert packet.view.energy_store_j is None
+    assert packet.view.energy_deploy_mode is None
