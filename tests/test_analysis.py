@@ -947,6 +947,32 @@ def test_strategy_prefers_race_trim_over_practice_for_the_same_compound() -> Non
     assert used[115]["contributed"]
 
 
+def test_a_shootout_flyer_is_not_race_evidence() -> None:
+    """Regression from the live Montreal weekend: the one-shot sprint shootout (type 14)
+    ran two laps on softs and its 1.29 %/lap "wear rate" — a tyre that never got hot —
+    outranked P1's seven-lap 7 %/lap run for the race-evidence tie-break. Shootouts are
+    qualifying-shaped and must sit in the practice tier."""
+    sessions, stints, laps, wear = two_stint_race()
+    sessions.append(strategy_session(359, 14, name="One-Shot Sprint Shootout"))
+    stints[359] = [
+        {"session_id": 359, "car_index": 21, "stint_no": 1, "compound_visual": 16,
+         "lap_start": 1, "lap_end": 2, "wear_at_end_json": {"tyre_wear_pct": [2.6, 2.4, 2.1, 2.2]}}
+    ]
+    laps[359] = race_laps_rows([(1, 16, 0, 104_222, 0.0), (2, 16, 1, 0, 0.0)])
+    wear[359] = wear_rows(359, {1: 1.3, 2: 2.6})
+
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=13, race_laps_source="request"
+    )
+    soft = next(c for c in payload["compounds"] if c["compound_visual"] == 16)
+    # The real race stint keeps the wear model; the shootout is read but practice-tier.
+    assert soft["wear"]["session_id"] == 115
+    used = {s["id"]: s for s in payload["sessions_used"]}
+    assert used[359]["evidence"] == "practice"
+    # And the fuel figure must not blend in shootout laps while race laps exist.
+    assert 359 not in payload["fuel"]["session_ids"]
+
+
 def test_strategy_uses_practice_when_that_is_all_there_is() -> None:
     sessions = [strategy_session(9, 1, name="Practice 1")]
     laps = race_laps_rows([(lap, 16, lap - 1, 92_000 + lap * 90, 0.0) for lap in range(1, 9)])

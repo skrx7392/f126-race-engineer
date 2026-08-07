@@ -93,15 +93,16 @@ SC_FLEXIBLE_WINDOW_LAPS = 3
 #: breaking the plan. Narrower than this and the window closes before a typical SC period
 #: is over, so the stop has to be taken on schedule whatever the race is doing.
 
-RACE_TRIM_SESSION_TYPES = frozenset(range(10, 18))
-#: Session types whose running is race trim. 15-17 are the races; 10-14 are the sprint
-#: weekend's sessions, which the game numbers alongside them and which include the sprint
-#: race itself (this recorder saw a real Miami sprint arrive as type 16, "Race 2"). A
-#: one-lap shootout inside this range contributes at most one lap, which cannot produce a
-#: degradation fit and loses every tie-break below to a longer run, so widening the range
-#: this far costs nothing and keeps genuine sprint data in the race tier where it belongs.
+RACE_TRIM_SESSION_TYPES = frozenset(range(15, 18))
+#: Session types whose running is race trim: the races themselves (sprints arrive as one
+#: of these too — a real Miami sprint came in as 16 "Race 2", Montreal's as 15). The
+#: sprint SHOOTOUTS (10-14) are qualifying-shaped and stay in the practice tier: a
+#: shootout stint is an out-lap plus one flyer, which can't produce a degradation fit but
+#: CAN produce a wear rate and a fuel delta — and on a real Montreal weekend those two
+#: laps beat P1's seven-lap soft run for the "race evidence" tie-break and published a
+#: 1.29 %/lap soft wear model from a tyre that never got hot.
 
-PRACTICE_SESSION_TYPES = frozenset(range(1, 10))
+PRACTICE_SESSION_TYPES = frozenset(range(1, 15))
 #: Practice and qualifying. Usable evidence, clearly worse evidence: push laps on new tyres
 #: with a light car. Tiered below race trim and labelled as such wherever it is used.
 
