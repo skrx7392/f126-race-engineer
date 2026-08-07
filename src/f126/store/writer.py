@@ -162,6 +162,18 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "last_wall",
         "packet_format",
     ),
+    # Written out-of-band by `insert_debrief` rather than through the queue — a debrief is
+    # one row per session, generated minutes after the capture path has gone quiet. It is
+    # listed here so the column order lives in one place and stays checked against
+    # schema.sql by tests/test_store.py.
+    "debriefs": (
+        "session_id",
+        "created_at",
+        "model",
+        "prompt_version",
+        "fact_sheet",
+        "text",
+    ),
 }
 
 # Upsert targets. Everything else is a plain append-only INSERT.
@@ -183,13 +195,21 @@ TABLE_ORDER: tuple[str, ...] = (
     "telemetry_samples",
     "wear_samples",
     "events",
+    "debriefs",
 )
 
 # Kept in the retry buffer while the DB is down; everything else is dropped and counted.
 RETAINED_TABLES = frozenset({"sessions", "participants", "laps"})
 
 JSONB_COLUMNS = frozenset(
-    {"weather_json", "final_classification_json", "damage_json", "details_json", "wear_at_end_json"}
+    {
+        "weather_json",
+        "final_classification_json",
+        "damage_json",
+        "details_json",
+        "wear_at_end_json",
+        "fact_sheet",
+    }
 )
 REAL_ARRAY_COLUMNS = frozenset(
     {"tyre_surface_temp", "tyre_inner_temp", "tyre_pressure", "brake_temp", "tyre_wear_pct"}
@@ -273,6 +293,47 @@ def _row_id(record: Any) -> int | None:
         return None
     value = record.get("id") if isinstance(record, Mapping) else record[0]
     return None if value is None else int(value)
+
+
+def insert_debrief(
+    conn: Any,
+    session_id: int,
+    *,
+    created_at: float,
+    model: str,
+    prompt_version: int,
+    fact_sheet: Mapping[str, Any],
+    text: str,
+) -> int | None:
+    """Append one `debriefs` row and return its id. Commits on the caller's connection.
+
+    Deliberately not routed through :class:`DbWriter`. That queue exists to keep the UDP hot
+    path off the database; a debrief is one row written minutes after the session ended, from
+    a CLI invocation or a background task that is allowed to block, and it needs the row id
+    back. Column order comes from ``TABLE_COLUMNS`` so this stays in step with schema.sql.
+
+    Regeneration is an INSERT, never an UPDATE: readers take the newest row, so a debrief
+    that came out badly is superseded rather than destroyed.
+    """
+    columns = TABLE_COLUMNS["debriefs"]
+    values = {
+        "session_id": int(session_id),
+        "created_at": float(created_at),
+        "model": model,
+        "prompt_version": int(prompt_version),
+        "fact_sheet": fact_sheet,
+        "text": text,
+    }
+    sql = f"{insert_sql('debriefs', columns)} RETURNING id"
+    params = tuple(adapt_value(column, values[column]) for column in columns)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        row_id = _row_id(cur.fetchone())
+    # A bare psycopg connection is not autocommit; the callers here own short-lived
+    # connections and would otherwise discard the row on close.
+    if not getattr(conn, "autocommit", True):
+        conn.commit()
+    return row_id
 
 
 # --- Stats ------------------------------------------------------------------------------------

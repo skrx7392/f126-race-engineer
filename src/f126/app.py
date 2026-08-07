@@ -13,6 +13,7 @@ import contextlib
 import logging
 import signal
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +142,139 @@ def _db_conn_factory(cfg: Config) -> Any | None:
     return factory
 
 
+# --- post-session debrief ---------------------------------------------------------------
+#
+# Generation happens here, off the capture path, in exactly two places: automatically when a
+# session closes with reason "finished", and on demand from `f126 debrief`. There is
+# deliberately no HTTP route that generates one — the dashboard's read-only invariant is
+# worth more than the convenience of a button.
+
+
+async def generate_debrief(cfg: Config, session_id: int, *, regenerate: bool = False) -> int | None:
+    """Build the fact sheet, have it written up, and store the result. Returns the row id.
+
+    Returns None when there was nothing to do: a debrief already exists and `regenerate` is
+    false, or the session has no player laps to describe.
+
+    Raises:
+        LlmError: the endpoint failed or is not configured.
+        AnalysisError: the session id is unknown.
+        psycopg.Error: the database is unreachable.
+    """
+    from f126.analysis.factsheet import build_fact_sheet  # noqa: PLC0415
+    from f126.llm import write_debrief  # noqa: PLC0415
+    from f126.store import queries  # noqa: PLC0415
+    from f126.store.writer import insert_debrief  # noqa: PLC0415
+
+    def _read() -> dict[str, Any] | None:
+        with store_db.connect(cfg.database_url) as conn:
+            if not regenerate and queries.latest_debrief(conn, session_id) is not None:
+                return None
+            if queries.player_lap_count(conn, session_id) < 1:
+                log.info("session %s has no player laps; skipping debrief", session_id)
+                return None
+            return build_fact_sheet(conn, session_id)
+
+    fact_sheet = await asyncio.to_thread(_read)
+    if fact_sheet is None:
+        return None
+
+    debrief = await write_debrief(cfg, fact_sheet)
+
+    def _write() -> int | None:
+        with store_db.connect(cfg.database_url) as conn:
+            return insert_debrief(
+                conn,
+                session_id,
+                created_at=time.time(),
+                model=debrief.model,
+                prompt_version=debrief.prompt_version,
+                fact_sheet=fact_sheet,
+                text=debrief.text,
+            )
+
+    row_id = await asyncio.to_thread(_write)
+    log.info(
+        "debrief written for session %s (row %s, model %s, %d words)",
+        session_id,
+        row_id,
+        debrief.model,
+        len(debrief.text.split()),
+    )
+    return row_id
+
+
+def _debrief_on_close(
+    cfg: Config, writer: DbWriter | None, tasks: set[asyncio.Task[Any]]
+) -> Callable[[Any, str], None]:
+    """The serve-path hook: a fire-and-forget debrief when a session finishes properly.
+
+    Three properties matter more than the debrief itself, since this runs inside the state
+    layer's close callback, which runs inside the packet pump:
+
+    * it never blocks — all it does synchronously is create a task;
+    * it never raises — the callback chain that ends a session must not be broken by an
+      optional feature, so every failure is logged and swallowed;
+    * it never runs on an unfinished session — only `reason == "finished"`, which means the
+      game sent a FinalClassification packet. A session that timed out or was superseded is
+      a fragment, and a debrief of a fragment is worse than none.
+
+    `tasks` is the caller's strong-reference set. asyncio only holds weak references to
+    tasks, so a task that nothing else refers to can be garbage collected mid-await.
+    """
+
+    def _on_close(key: Any, reason: str) -> None:
+        if reason != "finished" or not cfg.llm_enabled or not cfg.database_url:
+            return
+        try:
+            uid = key.uid_str
+        except AttributeError:
+            log.debug("debrief skipped: unrecognised session key %r", key)
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(
+                _debrief_task(cfg, writer, uid), name=f"debrief:{uid}"
+            )
+        except RuntimeError:
+            # No running loop: a replay driven from a synchronous test harness, or a close
+            # fired during interpreter shutdown. Nothing to schedule onto.
+            log.debug("debrief skipped for %s: no running event loop", uid)
+            return
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    return _on_close
+
+
+async def _debrief_task(cfg: Config, writer: DbWriter | None, session_uid: str) -> None:
+    """Wait for the session's final rows to land, then generate. Swallows every failure."""
+    try:
+        if writer is not None:
+            # The close callback runs before the writer has flushed the final classification
+            # and the last laps, and a fact sheet built from a half-written session would be
+            # confidently wrong. Flushing is the deterministic wait; the delay covers the
+            # case where there is no writer to flush.
+            await asyncio.to_thread(writer.flush, 30.0)
+        if cfg.debrief_delay_s > 0:
+            await asyncio.sleep(cfg.debrief_delay_s)
+
+        from f126.store import queries  # noqa: PLC0415
+
+        def _resolve() -> int | None:
+            with store_db.connect(cfg.database_url) as conn:
+                return queries.session_id_for_key(conn, session_uid)
+
+        session_id = await asyncio.to_thread(_resolve)
+        if session_id is None:
+            log.info("debrief skipped: no session row for uid %s", session_uid)
+            return
+        await generate_debrief(cfg, session_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("post-session debrief failed for uid %s (continuing)", session_uid)
+
+
 async def _serve_async(cfg: Config) -> int:
     salvaged = recover_orphans(cfg.data_dir)
     if salvaged:
@@ -188,10 +322,17 @@ async def _serve_async(cfg: Config) -> int:
         )
         return str(rawlog.final_path)
 
+    # Strong references to in-flight debrief tasks. asyncio holds only weak ones, so without
+    # this a debrief can be collected mid-request.
+    debrief_tasks: set[asyncio.Task[Any]] = set()
+    if cfg.llm_enabled:
+        log.info("post-session debriefs enabled (model %s)", cfg.llm_model)
+
     state = build_state(
         cfg,
         emit_row=writer.enqueue if writer is not None else None,
         on_rotate=_on_rotate,
+        on_session_close=_debrief_on_close(cfg, writer, debrief_tasks),
     )
 
     listener = await start_listener(cfg, queue)
@@ -248,6 +389,12 @@ async def _serve_async(cfg: Config) -> int:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # Debriefs are cancelled rather than awaited: shutdown must not wait 60 s on an
+        # LLM call, and the CLI can regenerate any debrief that was lost this way.
+        for t in debrief_tasks:
+            t.cancel()
+        if debrief_tasks:
+            await asyncio.gather(*debrief_tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
             listener.close()
         try:
@@ -390,3 +537,50 @@ def run_replay(cfg: Config, path: str, *, speed: str = "1", loop: bool = False) 
 def run_backfill(cfg: Config, paths: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     return asyncio.run(_backfill_async(cfg, paths))
+
+
+async def _debrief_async(cfg: Config, session_id: int, regenerate: bool) -> int:
+    from f126.analysis.resample import AnalysisError  # noqa: PLC0415
+    from f126.llm import LlmError  # noqa: PLC0415
+    from f126.store import queries  # noqa: PLC0415
+
+    if not cfg.database_url:
+        log.error("debrief requires F126_DATABASE_URL")
+        return 1
+    if not cfg.llm_enabled:
+        log.error("debrief requires F126_LLM_BASE_URL and F126_LLM_MODEL")
+        return 2
+
+    try:
+        row_id = await generate_debrief(cfg, session_id, regenerate=regenerate)
+    except AnalysisError as exc:
+        log.error("session %s: %s", session_id, exc.detail)
+        return 1
+    except LlmError as exc:
+        log.error("debrief generation failed: %s", exc)
+        return 1
+
+    def _read() -> Any:
+        with store_db.connect(cfg.database_url) as conn:
+            return queries.latest_debrief(conn, session_id)
+
+    existing = await asyncio.to_thread(_read)
+    if existing is None:
+        log.error("no debrief for session %s and none could be generated", session_id)
+        return 1
+    if row_id is None:
+        log.info(
+            "session %s already has a debrief; pass --regenerate to write a new one", session_id
+        )
+    print(existing["text"])
+    return 0
+
+
+def run_debrief(cfg: Config, session_id: int, *, regenerate: bool = False) -> int:
+    """`f126 debrief <session_id>` — generate (or print) one session's debrief.
+
+    Idempotent by default: a session that already has a debrief prints the stored one rather
+    than spending a request on a second opinion. `--regenerate` appends a new one.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    return asyncio.run(_debrief_async(cfg, session_id, regenerate))

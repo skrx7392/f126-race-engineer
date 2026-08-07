@@ -340,6 +340,52 @@ make deploy
 
 ---
 
+## Post-session debrief
+
+After a session finishes, the app can write you a ~250-word note in a race engineer's voice:
+what the result was, how repeatable your pace was, what the tyres did, and the one corner
+costing you the most against your own qualifying benchmark.
+
+It is **grounded**, which is the only reason it is worth reading. A deterministic builder
+computes every number out of the recorded telemetry — lap median and IQR, degradation slopes
+with their r², fuel burn with garage refuels excluded, the top three time-loss corners with
+brake-point deltas — and the model is handed that fact sheet and told it may not calculate,
+convert or estimate anything that is not already in it. Both the prose and the fact sheet are
+stored, so any sentence can be checked against the numbers behind it.
+
+**No model is ever in the live loop.** Nothing about capture, the pit wall or the API waits on
+it. If the endpoint is slow, down, or not configured, the only thing that does not happen is a
+paragraph of prose.
+
+Point it at any OpenAI-compatible endpoint:
+
+```bash
+F126_LLM_BASE_URL=http://your-proxy.example/v1   # empty = feature off (the default)
+F126_LLM_MODEL=your-model
+F126_LLM_API_KEY=                                # optional bearer token
+```
+
+Mind the path — some proxies mount the OpenAI surface under a prefix such as `/api/v1` and
+answer 404 on the bare `/v1`. Use whatever your endpoint answers `GET …/models` on. For the
+cluster, see the debrief section of `deploy/k8s/README.md`.
+
+Sessions that close cleanly get one automatically. Anything else — a backfilled capture, a
+session that timed out, or a debrief you want rewritten — is a command away:
+
+```bash
+f126 debrief 102                # print it, or write one if there is none
+f126 debrief 102 --regenerate   # write a new one; the previous is kept
+```
+
+It shows up as a collapsible **Debrief** card on the session page, captioned with the model
+and the time it was written. A session without one says so plainly rather than looking broken.
+
+There is **no HTTP route that generates a debrief** — `GET /api/sessions/{id}/debrief` reads
+one and that is all. A POST would have been convenient and would have cost the read-only
+invariant that lets this dashboard sit on the open internet.
+
+---
+
 ## Raw captures and backfill
 
 Every packet is written to `/data/raw/<session>.f1raw` (zstd-compressed) *before* parsing. The

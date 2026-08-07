@@ -49,6 +49,28 @@ class Config:
         default_factory=lambda: os.environ.get("F126_STATIC_DIR", "frontend/dist")
     )
 
+    # Post-session debrief (LLM). The endpoint is OpenAI-compatible and reached over plain
+    # HTTP; an empty base URL disables the whole feature, which is the default everywhere.
+    # No LLM is ever in the live loop — see the module docstring of f126.llm.
+    llm_base_url: str = field(default_factory=lambda: os.environ.get("F126_LLM_BASE_URL", ""))
+    llm_model: str = field(default_factory=lambda: os.environ.get("F126_LLM_MODEL", ""))
+    llm_api_key: str = field(default_factory=lambda: os.environ.get("F126_LLM_API_KEY", ""))
+    llm_timeout_s: float = field(default_factory=lambda: _float("F126_LLM_TIMEOUT_S", 60.0))
+    #: Grace period between a session closing and the debrief reading the database, so the
+    #: batching writer has flushed the final classification and the last laps. The serve
+    #: path also flushes the writer explicitly; this covers the case where there is none.
+    debrief_delay_s: float = field(default_factory=lambda: _float("F126_DEBRIEF_DELAY_S", 5.0))
+
+    @property
+    def llm_enabled(self) -> bool:
+        """Whether a debrief can be generated at all. Both halves are required.
+
+        A base URL without a model would fail one request at a time inside a fire-and-forget
+        task, which is exactly the kind of failure that goes unnoticed; refusing up front
+        makes it a startup-visible configuration error instead.
+        """
+        return bool(self.llm_base_url.strip() and self.llm_model.strip())
+
 
 def load() -> Config:
     return Config()

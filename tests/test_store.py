@@ -551,7 +551,10 @@ def test_apply_schema_is_idempotent(scratch_url: str) -> None:
     assert db.init_db(scratch_url) == db.SCHEMA_VERSION
     assert db.init_db(scratch_url) == db.SCHEMA_VERSION  # second boot must be a no-op
     with db.connect(scratch_url) as conn:
-        assert db.schema_version(conn) == 1
+        # Tracks the constant, not a literal: schema.sql seeds `schema_meta` with 1 and
+        # apply_schema then rolls it forward, so pinning the number here would fail on
+        # every future version bump for no reason of its own.
+        assert db.schema_version(conn) == db.SCHEMA_VERSION
         assert _count(conn, "schema_meta") == 1
         for table in TABLE_COLUMNS:
             assert _count(conn, table) == 0

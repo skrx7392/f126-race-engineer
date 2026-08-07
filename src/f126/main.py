@@ -26,6 +26,14 @@ def main(argv: list[str] | None = None) -> int:
     p_backfill = sub.add_parser("backfill", help="re-parse raw captures into the database")
     p_backfill.add_argument("paths", nargs="*", help="files/dirs; default: DATA_DIR/raw")
 
+    p_debrief = sub.add_parser("debrief", help="write the post-session debrief for one session")
+    p_debrief.add_argument("session_id", type=int, help="sessions.id, as shown by /api/sessions")
+    p_debrief.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="write a new debrief even if one exists (the old one is kept)",
+    )
+
     args = parser.parse_args(argv)
     cfg = config.load()
 
@@ -41,6 +49,10 @@ def main(argv: list[str] | None = None) -> int:
         from f126.app import run_backfill
 
         return run_backfill(cfg, args.paths)
+    if args.command == "debrief":
+        from f126.app import run_debrief
+
+        return run_debrief(cfg, args.session_id, regenerate=args.regenerate)
     return 2
 
 

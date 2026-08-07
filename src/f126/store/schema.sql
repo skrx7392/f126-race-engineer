@@ -1,4 +1,4 @@
--- f126 Postgres schema, version 1.
+-- f126 Postgres schema, version 2.
 --
 -- Postgres is a DERIVED INDEX: the .f1raw capture logs are the source of truth and
 -- every table here can be rebuilt with `f126 backfill`. That is why sample tables are
@@ -172,3 +172,24 @@ CREATE TABLE IF NOT EXISTS raw_captures (
 );
 
 CREATE INDEX IF NOT EXISTS raw_captures_session_idx ON raw_captures (session_id);
+
+-- Post-session debrief (schema v2). `fact_sheet` is the deterministic input:
+-- f126.analysis.factsheet computed every number in it from the tables above, and `text` is
+-- prose an LLM wrote FROM that sheet and nothing else. Storing both is what makes a debrief
+-- auditable — any claim in the text can be checked against the numbers it was given.
+--
+-- Append-only, like the sample tables: regenerating inserts a new row and readers take the
+-- newest, so a bad generation never destroys the one before it. `prompt_version` records
+-- which prompt produced the text, so a prompt change is visible rather than retroactive.
+CREATE TABLE IF NOT EXISTS debriefs (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id BIGINT REFERENCES sessions(id) ON DELETE CASCADE,
+    created_at DOUBLE PRECISION,
+    model TEXT,
+    prompt_version INT,
+    fact_sheet JSONB,
+    text TEXT
+);
+
+CREATE INDEX IF NOT EXISTS debriefs_session_idx
+    ON debriefs (session_id, created_at DESC NULLS LAST, id DESC);

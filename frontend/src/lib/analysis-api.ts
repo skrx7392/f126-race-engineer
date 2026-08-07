@@ -231,6 +231,25 @@ export interface StintsResponse {
   stints: Stint[];
 }
 
+/**
+ * `GET /api/sessions/{id}/debrief` — the post-session note. **404 when none exists**, which
+ * is the normal state of a session that was just recorded, not a failure.
+ *
+ * `fact_sheet` is the deterministic dict the text was written from: every number in `text`
+ * came out of it, so the two together are an auditable record rather than an assertion. It
+ * is `unknown` here because nothing in the UI reads inside it — it is carried so the panel
+ * can say the numbers exist, and so a future page can show them.
+ */
+export interface Debrief {
+  session_id: number;
+  /** Epoch seconds, fractional. When the debrief was generated. */
+  created_at: number | null;
+  model: string | null;
+  prompt_version: number | null;
+  text: string | null;
+  fact_sheet: unknown;
+}
+
 // ── transport ────────────────────────────────────────────────────────────────
 
 /**
@@ -377,3 +396,22 @@ export const fetchCorners = (
 
 export const fetchStints = (sessionId: number, signal?: AbortSignal): Promise<StintsResponse> =>
   apiGet<StintsResponse>(`/api/analysis/stints${q({ session_id: sessionId })}`, signal);
+
+/**
+ * The stored debrief, or `null` when the session has none.
+ *
+ * The 404 is folded into `null` here rather than at every call site: a session without a
+ * debrief is an ordinary session, and rendering the "Not found" error panel over it would
+ * report a missing paragraph as a broken page. Every other status still throws.
+ */
+export const fetchDebrief = async (
+  id: number,
+  signal?: AbortSignal
+): Promise<Debrief | null> => {
+  try {
+    return await apiGet<Debrief>(`/api/sessions/${id}/debrief`, signal);
+  } catch (err) {
+    if (err instanceof ApiError && err.kind === 'notfound') return null;
+    throw err;
+  }
+};

@@ -113,9 +113,74 @@ file by hand if you ever want the restriction on. Do not add it to the overlay's
 the Middleware alone does nothing, and adding the annotation without the Middleware
 takes the site down with a 500 from Traefik.
 
+## Post-session debrief
+
+Optional, and **off in the base**. When it is configured, the serve process writes a
+~250-word debrief after every session that finishes, from a fact sheet it computes
+itself; when it is not, nothing else changes. No model is ever in the live loop, so a
+missing or broken endpoint costs a paragraph and nothing more.
+
+It needs two values in the pod, plus an optional third:
+
+| Variable | Meaning |
+| --- | --- |
+| `F126_LLM_BASE_URL` | OpenAI-compatible base URL **including the version segment**. The client appends `/chat/completions`. Empty = feature disabled. |
+| `F126_LLM_MODEL` | Model id as the endpoint names it. Required — a base URL with no model counts as disabled. |
+| `F126_LLM_API_KEY` | Optional bearer token. |
+
+Mind the path. Some proxies serve `/v1`, others mount the same surface under a prefix
+such as `/api/v1` and answer 404 on the bare one. Use whatever path your endpoint
+answers `GET …/models` on.
+
+The base ships none of these, because a service name is environment-specific in
+exactly the way a hostname is. Put them in your gitignored overlay:
+
+```yaml
+patches:
+  - target:
+      kind: Deployment
+      name: f126
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: F126_LLM_BASE_URL
+          value: http://llm-proxy.example.svc.cluster.local/api/v1
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: F126_LLM_MODEL
+          value: example-model:latest
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: F126_LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: f126-llm
+              key: api_key
+              optional: true
+```
+
+`add` at `…/env/-` appends, so these do not depend on the index of anything already in
+the base's `env` and a re-apply stays a no-op diff.
+
+The key, if you need one, is created by hand like `f126-db`:
+
+```bash
+kubectl -n f126 create secret generic f126-llm --from-literal=api_key=<key>
+```
+
+Backfilled sessions get no debrief automatically — `f126 backfill` has no session-close
+callback, by design. Write one on demand instead:
+
+```bash
+kubectl -n f126 exec deploy/f126 -- f126 debrief <session_id>
+```
+
 ## What is NOT in here
 
-No Secret. `f126-db` (key: `url`) is created by hand on the cluster — see the
-first-time deploy section of the top-level README. The Deployment references it with
-`optional: true`, so the pod starts without it and degrades to raw-capture-only
-rather than crash-looping.
+No Secret. `f126-db` (key: `url`) and `f126-llm` (key: `api_key`) are created by hand on
+the cluster — see the first-time deploy section of the top-level README and the debrief
+section above. The Deployment references both with `optional: true`, so the pod starts
+without them and degrades (raw-capture-only, no debriefs) rather than crash-looping.

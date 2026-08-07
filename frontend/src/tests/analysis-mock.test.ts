@@ -10,6 +10,7 @@ import {
   mockCompare,
   mockCorners,
   mockLaps,
+  mockDebrief,
   mockSessionDetail,
   mockSessions,
   mockStints,
@@ -321,7 +322,8 @@ describe('request routing', () => {
       `/api/sessions/${HEADLINE_SESSION_ID}/laps/12/telemetry`,
       `/api/analysis/compare?session_a=3&lap_a=12&session_b=3&lap_b=9`,
       `/api/analysis/corners?session_id=3&lap=12&ref=best`,
-      `/api/analysis/stints?session_id=3`
+      `/api/analysis/stints?session_id=3`,
+      `/api/sessions/${HEADLINE_SESSION_ID}/debrief`
     ];
     for (const p of paths) {
       const res = handleMockRequest(p);
@@ -337,6 +339,35 @@ describe('request routing', () => {
 
   it('rejects a compare call missing its parameters', () => {
     expect(handleMockRequest('/api/analysis/compare?session_a=3')?.status).toBe(422);
+  });
+
+  it('serves a debrief for the race and a 404 for the sessions without one', () => {
+    // The absent state is only reachable in dev if some session genuinely lacks a
+    // debrief, so at least one fixture session has to answer 404.
+    const present = handleMockRequest(`/api/sessions/${HEADLINE_SESSION_ID}/debrief`);
+    expect(present?.status).toBe(200);
+
+    const missing = mockSessions()
+      .map((s) => s.id)
+      .filter((id) => id !== HEADLINE_SESSION_ID)
+      .map((id) => handleMockRequest(`/api/sessions/${id}/debrief`));
+    expect(missing.length).toBeGreaterThan(0);
+    for (const res of missing) expect(res?.status).toBe(404);
+  });
+
+  it('quotes only numbers that are in the fact sheet it ships with', () => {
+    // The mock has to demonstrate the grounding contract, not just fill space: a
+    // fixture whose prose cites figures its own fact sheet does not contain would
+    // model the exact failure the real feature is built to prevent.
+    const debrief = mockDebrief(HEADLINE_SESSION_ID);
+    expect(debrief).not.toBeNull();
+    const sheet = JSON.stringify(debrief?.fact_sheet);
+    for (const quoted of ['1:33.412', '1:34.180', '0.62', '148', '84']) {
+      expect(sheet, quoted).toContain(quoted);
+      expect(debrief?.text, quoted).toContain(quoted);
+    }
+    expect(debrief?.prompt_version).toBe(1);
+    expect(debrief?.model).toBeTruthy();
   });
 });
 

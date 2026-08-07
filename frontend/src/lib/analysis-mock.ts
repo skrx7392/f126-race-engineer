@@ -33,6 +33,7 @@ import type {
   Corner,
   CornerKind,
   CornersResponse,
+  Debrief,
   Lap,
   LapTelemetry,
   Participant,
@@ -1083,6 +1084,64 @@ function linearFit(xs: number[], ys: number[]): { slope: number; base: number; r
   return { slope, base, r2 };
 }
 
+// ── debrief ──────────────────────────────────────────────────────────────────
+
+/**
+ * The prose an LLM wrote from the race's fact sheet, and a slice of that sheet.
+ *
+ * Written to look like a real grounded debrief rather than lorem ipsum: every
+ * figure quoted here appears in the `fact_sheet` beside it, which is the whole
+ * point of the feature and the thing the panel exists to show.
+ *
+ * Only the headline race has one. The quali and the Monza session deliberately
+ * do not, so the "no debrief yet" state is reachable in dev without a backend —
+ * the same reason `OTHER_TRACK_SESSION_ID` exists for the 422 path.
+ */
+const MOCK_DEBRIEF_TEXT = `P4 from P6, and the race was won in the first stint rather than the last.
+
+Your best lap was a 1:33.412 on lap 8, and the median of your eleven representative laps was 1:34.180 — a spread of 0.62 s between the first and third quartile. That is tight for a race stint, and it is the reason the strategy held: you were repeatable enough that the medium stint's degradation of 84 ms per lap was the only thing eating the gap.
+
+The soft stint told a different story. Six laps, 148 ms per lap of degradation, and by lap 6 you were 0.9 s off the pace you set on lap 2. The stop came at the right time.
+
+Against the qualifying benchmark you lost 1.31 s over the lap, and 0.74 s of that sits in three corners. The worst is the slow corner at 1285 m: you are 8.5 km/h down at the apex and braking 27 m earlier than the reference. The medium corner at 2460 m costs another 0.24 s on the same pattern — early brake, low minimum, late reapplication.
+
+One flashback, no penalties, no safety car. Nothing about this race was chaotic; it was decided on tyre management and one corner.
+
+Focus for the next session: the slow corner at 1285 m. Carry the brake 25 m deeper and hold the minimum speed above 120 km/h.`;
+
+const MOCK_FACT_SHEET = {
+  fact_sheet_version: 1,
+  session: { track: 'Bahrain', type: 'Race', is_race: true },
+  result: { finish_position: 4, grid_position: 6, places_gained: 2, points_scored: 12 },
+  pace: {
+    best_lap: '1:33.412',
+    best_lap_number: 8,
+    median_lap: '1:34.180',
+    iqr_s: 0.62,
+    consistency_laps_used: 11
+  },
+  stints: [
+    { stint: 1, compound: 'Soft', degradation_ms_per_lap: 148, degradation_confidence: 'strong' },
+    { stint: 2, compound: 'Medium', degradation_ms_per_lap: 84, degradation_confidence: 'strong' }
+  ],
+  events: { flashbacks: 1, penalties: [], safety_car_deployments: 0, pit_stops: 1 }
+};
+
+/** The stored debrief for one session, or null when it has none. */
+export function mockDebrief(sessionId: number): Debrief | null {
+  const seed = seedFor(sessionId);
+  if (!seed || seed.id !== HEADLINE_SESSION_ID) return null;
+  return {
+    session_id: seed.id,
+    // Generated a couple of minutes after the session closed, as the serve path does.
+    created_at: BASE_WALL + seed.startedOffset + seed.durationS + 137,
+    model: 'example-model:8b',
+    prompt_version: 1,
+    text: MOCK_DEBRIEF_TEXT,
+    fact_sheet: MOCK_FACT_SHEET
+  };
+}
+
 export function mockStints(sessionId: number): StintsResponse | MockFailure {
   const seed = seedFor(sessionId);
   if (!seed) return { status: 404, detail: 'session not found' };
@@ -1193,6 +1252,14 @@ export function handleMockRequest(rawUrl: string): MockResponse | null {
 
   const laps = /^\/api\/sessions\/([0-9]{1,20})\/laps$/.exec(path);
   if (laps) return { status: 200, body: mockLaps(Number(laps[1]), num(p.get('car_index'))) };
+
+  const debrief = /^\/api\/sessions\/([0-9]{1,20})\/debrief$/.exec(path);
+  if (debrief) {
+    const found = mockDebrief(Number(debrief[1]));
+    return found
+      ? { status: 200, body: found }
+      : { status: 404, body: { detail: 'no debrief for this session' } };
+  }
 
   const telemetry = /^\/api\/sessions\/([0-9]{1,20})\/laps\/([0-9]{1,20})\/telemetry$/.exec(path);
   if (telemetry) {

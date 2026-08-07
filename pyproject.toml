@@ -10,6 +10,10 @@ dependencies = [
     "zstandard>=0.25.0",
     "numpy>=2.3",
     "scipy>=1.16",
+    # Already present transitively (FastAPI's TestClient pulls it); promoted to a runtime
+    # dependency because f126.llm posts the post-session debrief with it, and the shipped
+    # image installs only this list.
+    "httpx>=0.28",
 ]
 
 [project.scripts]
@@ -19,7 +23,6 @@ f126 = "f126.main:main"
 dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.0",
-    "httpx>=0.28",
     "hypothesis>=6.130",
     "ruff>=0.14",
 ]

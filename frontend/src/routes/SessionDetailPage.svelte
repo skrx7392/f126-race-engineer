@@ -10,8 +10,10 @@
    * once — the row, the chart point, and the nav chip.
    */
   import {
+    fetchDebrief,
     fetchLaps,
     fetchSession,
+    type Debrief,
     type Lap,
     type SessionDetail
   } from '../lib/analysis-api';
@@ -32,6 +34,12 @@
 
   let session = $state<Async<SessionDetail>>(LOADING);
   let laps = $state<Async<Lap[]>>(LOADING);
+  /**
+   * The post-session debrief. `null` inside an `ok` state means the session has none —
+   * `fetchDebrief` folds the 404 into that, because a session nobody has debriefed yet is
+   * an ordinary session and must not render as a failed request.
+   */
+  let debrief = $state<Async<Debrief | null>>(LOADING);
   let attempt = $state(0);
 
   /** Which car's laps to list. Null means "whatever the session says is ours". */
@@ -57,6 +65,22 @@
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return;
         session = { status: 'error', error };
+      });
+    return () => controller.abort();
+  });
+
+  $effect(() => {
+    void attempt;
+    const id = sessionId;
+    const controller = new AbortController();
+    debrief = LOADING;
+    fetchDebrief(id, controller.signal)
+      .then((data) => {
+        debrief = { status: 'ok', data };
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        debrief = { status: 'error', error };
       });
     return () => controller.abort();
   });
@@ -257,6 +281,43 @@
         </div>
       </header>
 
+      <!--
+        The debrief sits directly under the header, above the instruments: it is the one
+        thing on this page you read rather than operate, and it says what the numbers below
+        it mean. Collapsed by default, because the lap table is why you came here.
+      -->
+      <!--
+        No `.panel` wrapper here: StatePanel draws its own bordered box for the loading,
+        error and empty states, and nesting one inside another gives the absent state a
+        double border.
+      -->
+      <div data-panel="debrief">
+        <StatePanel
+          state={debrief}
+          loadingLabel="the debrief"
+          isEmpty={(d) => d === null}
+          emptyMessage="No debrief yet — run: f126 debrief {sessionId}"
+        >
+          {#snippet children(d)}
+            {#if d}
+              <details class="panel debrief">
+                <summary class="label">
+                  Debrief
+                  <span class="summary-meta"
+                    >{d.model ?? 'unknown model'} · {formatSessionDate(d.created_at)}</span
+                  >
+                </summary>
+                <p class="debrief-text" data-testid="debrief-text">{d.text}</p>
+                <p class="debrief-note label">
+                  Written from a fact sheet computed off this session's telemetry. Every
+                  number above came from that sheet.
+                </p>
+              </details>
+            {/if}
+          {/snippet}
+        </StatePanel>
+      </div>
+
       <!-- Tyre life across the session, above the laps it explains. -->
       {#if stints.length > 0}
         <div class="panel" data-panel="stint-strip">
@@ -436,6 +497,52 @@
 </section>
 
 <style>
+  /* Debrief. Graphite only — this is prose, and the accent colours on this page all
+     carry meaning (compound, delta, fit confidence). Giving a paragraph a hue would
+     make it look like a status. */
+  .debrief summary {
+    cursor: pointer;
+    color: var(--ink-3);
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    justify-content: space-between;
+  }
+
+  .debrief summary:hover {
+    color: var(--ink-2);
+  }
+
+  .summary-meta {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+    font-size: 0.62rem;
+    color: var(--ink-3);
+  }
+
+  .debrief-text {
+    /* The backend emits paragraphs separated by blank lines and nothing else — no
+       markdown, no HTML — so pre-wrap is both the correct rendering and the safe one. */
+    white-space: pre-wrap;
+    margin: 0.5rem 0 0;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--line);
+    max-width: 68ch;
+    font-size: 0.82rem;
+    line-height: 1.65;
+    color: var(--ink-2);
+  }
+
+  .debrief-note {
+    margin: 0.6rem 0 0;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+    max-width: 68ch;
+    color: var(--ink-3);
+  }
+
   .grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

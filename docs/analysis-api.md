@@ -88,6 +88,50 @@ Deterministic for a given lap; tuning constants live in one module with rational
 Fit is least-squares linear over valid, non-excluded laps (excluded = in/out laps, laps with
 pit status, laps > 107% of stint median — flagged, not hidden).
 
+## `GET /api/sessions/{id}/debrief`
+The stored post-session debrief. **404 when the session has none**, which is the ordinary
+state of a session that was just recorded rather than an error; 503 if the DB is down.
+```json
+{"id": 7, "session_id": 102, "created_at": 1770002000.0,
+ "model": "example-model:latest", "prompt_version": 1,
+ "fact_sheet": { ... },          // the deterministic input, see below
+ "text": "P3 from P7, and the race was won in the first stint..."}
+```
+Append-only: regenerating writes a new row and this returns the newest, so a bad generation
+supersedes rather than destroys the one before it.
+
+`text` is **prose an LLM wrote from `fact_sheet` and nothing else**. Every number in the
+fact sheet was computed by `f126.analysis.factsheet` out of the tables the endpoints above
+read; the system prompt forbids the model from calculating, converting or estimating any
+figure that is not already there. Storing both is what makes a debrief auditable — any claim
+in the text can be checked against the numbers it was handed. Render `text` as plain text
+(`white-space: pre-wrap`); it is never markdown or HTML.
+
+Fact-sheet shape (sections are omitted when they could not be computed, and the reason is
+recorded under `omitted` — a missing input never becomes a zero):
+
+| Section | Contents |
+| --- | --- |
+| `units` | what every suffix and sign convention means, restated for the model |
+| `session` | track, type, start time, driver, scheduled laps, duration, `is_race` |
+| `result` | **race only** — finish/grid position, places gained, points, pit stops, status |
+| `standing` | **non-race only** — position on the timing sheet, field size |
+| `pace` | lap counts, personal best + sectors, median/IQR over representative laps, and which laps were excluded from that and why |
+| `stints` | per stint: compound, lap range, laps on the set, degradation slope with r² and a `degradation_confidence` word |
+| `corners` | the best lap against the session's next-best lap *and* against the circuit benchmark; top 3 time-loss corners each, with min-speed and brake-point deltas |
+| `fuel` | median burn per lap, laps measured, laps dropped as garage refuels |
+| `events` | flashbacks, safety cars, penalties, collisions, pit stops |
+| `weather` | conditions, track/air temperature, rain probability ahead |
+
+Corner numbers in the sheet are **detected braking zones in track order, not the circuit's
+official turn numbers** — segmentation finds 8 zones on Jeddah's 27-turn lap. The sheet says
+so in-band and the prompt forbids "Turn N" phrasing; corners are named by `apex_m`.
+
+**There is no route that generates a debrief.** The HTTP surface stays read-only. Generation
+happens in the serve process when a session closes with reason `finished` (a fire-and-forget
+task off the capture path, skipped when the feature is unconfigured), and on demand from
+`f126 debrief <session_id> [--regenerate]`.
+
 ## Frontend pages (SPA routes, consuming the above)
 - `#/sessions` — session browser: table (date, track, type, laps, best lap), newest first.
 - `#/sessions/{id}` — detail: lap table per car (player default), lap-time chart, stint strip;
@@ -98,3 +142,7 @@ pit status, laps > 107% of stint median — flagged, not hidden).
   zooms the compare charts to that distance window (shared state with compare view).
 - `#/stints?...` — lap-time scatter + fitted deg lines per stint, wear-at-end chips.
 Live pit wall stays the default route (`#/` = current behavior, untouched).
+
+The session detail page also carries a collapsible **Debrief** card above the instruments,
+captioned `model · generated at`. A session without one says "No debrief yet — run: f126
+debrief {id}" rather than rendering the not-found error panel: absence is normal here.

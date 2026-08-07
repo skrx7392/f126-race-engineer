@@ -100,3 +100,69 @@ Reversals welcome — flag anything and I'll adjust.
     and took the whole trace pane down. Series are a fixed-length positional array, so the
     index *is* the identity. Same fix for the weather forecast strip, keyed on `offset_min`,
     which the game can repeat.
+
+## 2026-08-07 — Phase 2.5, the post-session debrief
+
+18. **The debrief is grounded, and the split is enforced in two places.** A deterministic
+    builder (`analysis/factsheet.py`) computes every number from the recorded tables; the
+    LLM is given that dict and told, in the system prompt, that it may not calculate,
+    convert or estimate any figure that is not already in it. Both halves are stored on the
+    `debriefs` row, so every sentence is checkable against the numbers it was handed. The
+    fact sheet is a pure function of the rows — no clocks, no unordered iteration, floats
+    rounded on the way out — and a test asserts two consecutive builds are byte-identical.
+
+19. **No LLM anywhere near the live loop.** Generation happens in exactly two places: a
+    fire-and-forget task when a session closes with reason `finished`, and `f126 debrief
+    <id>`. The task flushes the DB writer first (the close callback fires before the final
+    classification is committed, and a sheet built from a half-written session would be
+    confidently wrong), logs and swallows every failure, and is cancelled rather than
+    awaited at shutdown. **No mutating HTTP route was added** — a POST would have been
+    convenient and would have cost the invariant that lets this dashboard sit on the open
+    internet. `GET /api/sessions/{id}/debrief` reads; 404 means "not written yet", which the
+    UI states in its own words instead of rendering the not-found error panel.
+
+20. **Schema v2 adds `debriefs`, append-only.** Regeneration inserts a new row and readers
+    take the newest, so a bad generation supersedes rather than destroys the one before it.
+    `schema.sql` is `CREATE ... IF NOT EXISTS` throughout, so the v1→v2 upgrade needed no
+    ALTER. `ON DELETE CASCADE`, like every other derived table: Postgres stays re-derivable
+    from the raw captures.
+
+21. **Four real-data bugs found by building the sheet against the actual race, and fixed.**
+    Session 102 and the two qualis were run through the builder read-only against the live
+    database before this shipped, which is the only reason these were caught:
+    - the game writes a final-classification packet for *qualifying* too, carrying a stale
+      `points: 15` and a `total_race_time_s` that is really just the lap time — the sheet
+      claimed the driver had scored 15 championship points for one flying lap. `result` is
+      now race-gated; non-race sessions get a narrow `standing` block instead.
+    - `time_s: 255` on a lap-1 warning was reported as a 255-second penalty. 255 is the
+      game's 0xFF "not applicable" byte; every optional u8 in an event payload now reads
+      back as absent.
+    - `grid_position: 0` (the "no grid slot" sentinel) survived the None-filter and read as
+      "started from P0".
+    - a practice session with five compound changes reported "4 pit stops". The stint-count
+      fallback is now race-only; outside a race the field is omitted rather than guessed.
+
+22. **`degradation_confidence` is in the sheet as a word, not left as an r².** Measured on
+    the real race, both stints fitted at r² ≈ 0.003 and rounded to `0.00` at two decimals,
+    making "no correlation at all" indistinguishable from "weak". r² is now carried to three
+    decimals *and* accompanied by strong/fair/weak on the same bands the stints page renders
+    (`analysis-format.ts::fitConfidence`), and the prompt forbids quoting a weak slope as
+    degradation. Without this a debrief would state "your softs gained 0.73 s per lap".
+
+23. **Corners are named by distance, never as "Turn N".** `analyse_corners` segments braking
+    zones by speed prominence and numbers them in track order — that is 8 zones across
+    Jeddah's 27 turns, so "corner 8" is the eighth *detected* zone. A debrief saying "Turn 8"
+    sends the driver to the wrong corner, so the sheet carries the caveat in-band next to
+    every comparison and the prompt requires the `apex_m` distance instead.
+
+24. **`httpx` promoted from a dev dependency to a runtime one.** It was already in the
+    lockfile (FastAPI's test client pulls it) but the shipped image installs only the main
+    list, so `f126.llm` importing it would have failed in the pod and nowhere else. No new
+    library was added — the OpenAI dialect is four fields of JSON over one POST.
+
+25. **The in-cluster proxy URL lives only in gitignored files.** `deploy/.env` and
+    `deploy/local/kustomization.yaml` carry the real service name; the tracked base ships no
+    LLM env at all, which leaves the feature disabled by default in a fresh clone — the
+    right default for a public repo. Worth recording: that proxy mounts the OpenAI surface
+    under `/api/v1`, and plain `/v1` returns 404, so the configured base URL includes the
+    prefix. Cluster access for this work was strictly read-only; nothing was applied.

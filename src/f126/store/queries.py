@@ -358,3 +358,65 @@ def tyre_stints_for_session(
 ) -> list[JsonRow]:
     """Recorded tyre stints, optionally for one car. Empty when stints were never written."""
     return _fetch(conn, _TYRE_STINTS_SQL, (session_id, car_index, car_index))
+
+
+# --------------------------------------------------------------------------------------
+# Phase 2.5 debriefs (f126.analysis.factsheet / f126.llm)
+# --------------------------------------------------------------------------------------
+
+# Newest generation wins, exactly like `laps`: regenerating a debrief appends a row rather
+# than replacing one, so "the debrief" always means the most recent attempt. `id DESC` breaks
+# ties, because two regenerations inside the same clock tick are possible and NULL
+# created_at (a row written by a client that lost its clock) must not win by accident.
+_LATEST_DEBRIEF_SQL = """
+    SELECT id, session_id, created_at, model, prompt_version, fact_sheet, text
+      FROM debriefs
+     WHERE session_id = %s
+     ORDER BY created_at DESC NULLS LAST, id DESC
+     LIMIT 1
+"""
+
+# The representative row for one game session, by the same rule the session list uses: the
+# segment that knows its track/type, then the one with the most laps. A session that spans
+# several segments (a pause, a process restart) must debrief the segment the analysis
+# endpoints are pointed at, not whichever fragment happened to close last.
+_SESSION_ID_FOR_KEY_SQL = """
+    SELECT s.id
+      FROM sessions s
+     WHERE s.session_uid = %s
+       AND (%s::int IS NULL OR s.segment = %s::int)
+     ORDER BY (s.track_id >= 0 AND s.session_type > 0) DESC,
+              (SELECT count(DISTINCT (l.car_index, l.lap_number)) FROM laps l
+                WHERE l.session_id = s.id) DESC,
+              s.id DESC
+     LIMIT 1
+"""
+
+_PLAYER_LAP_COUNT_SQL = """
+    SELECT count(DISTINCT l.lap_number) AS n
+      FROM laps l JOIN sessions s ON s.id = l.session_id
+     WHERE l.session_id = %s AND l.car_index = s.player_car_index
+"""
+
+
+def latest_debrief(conn: Conn, session_id: int) -> JsonRow | None:
+    """The most recent debrief for one session, or None when none has been generated."""
+    rows = _fetch(conn, _LATEST_DEBRIEF_SQL, (session_id,))
+    return rows[0] if rows else None
+
+
+def session_id_for_key(conn: Conn, session_uid: str, segment: int | None = None) -> int | None:
+    """Map the state layer's `(session_uid, segment)` onto the `sessions.id` readers use.
+
+    `segment=None` widens the search to every segment of that uid and picks the
+    representative one — which is what the serve-path debrief trigger wants, since the
+    segment that just closed is not necessarily the one holding the session's laps.
+    """
+    rows = _fetch(conn, _SESSION_ID_FOR_KEY_SQL, (str(session_uid), segment, segment))
+    return int(rows[0]["id"]) if rows else None
+
+
+def player_lap_count(conn: Conn, session_id: int) -> int:
+    """How many distinct laps the player car recorded. 0 for an unknown session."""
+    rows = _fetch(conn, _PLAYER_LAP_COUNT_SQL, (session_id,))
+    return int(rows[0]["n"]) if rows and rows[0]["n"] is not None else 0

@@ -18,6 +18,7 @@ them is applied to the live view or written out.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -39,6 +40,8 @@ from f126.state.session import (
     session_type_name,
 )
 from f126.types import ParsedPacket
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "PROTOCOL_VERSION",
@@ -103,11 +106,19 @@ def build_state(
     emit_row: EmitRow | None = None,
     on_rotate: Callable[[int, int], Any] | None = None,
     events: Any = None,
+    on_session_close: Callable[[SessionKey, CloseReason], None] | None = None,
 ) -> StateBundle:
     """Construct the state layer with all callbacks fanned out.
 
     `on_rotate` may return the path of the file it opened; when it does, that
     path is threaded into the `sessions` row as `raw_file`.
+
+    `on_session_close` is an extra observer, invoked last — after the live view
+    and the row builder have both handled the close, so anything it reads from
+    the database sees the rows that close produced. It is for work that hangs off
+    a session ending without being part of ending it (the post-session debrief);
+    it must not raise, and a raise is logged and swallowed here rather than
+    breaking the lifecycle for an optional extra.
     """
     live = LiveState(cfg, events=events)
     rows = RowBuilder(cfg, emit_row) if emit_row is not None else None
@@ -121,6 +132,11 @@ def build_state(
         live.on_session_close(key, reason)
         if rows is not None:
             rows.on_session_close(key, reason)
+        if on_session_close is not None:
+            try:
+                on_session_close(key, reason)
+            except Exception:
+                log.exception("session-close observer failed for %s (continuing)", key)
 
     def _fan_segment(key: SessionKey, segment: int) -> None:
         live.on_segment(key, segment)
