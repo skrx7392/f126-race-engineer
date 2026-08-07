@@ -39,3 +39,11 @@ Reversals welcome — flag anything and I'll adjust.
    pre-existing shared Postgres needed a temporary, unix-socket-only auth relaxation, since
    reverted and verified — details in `decisions-private.md` (local, gitignored: the entry
    describes one specific cluster, not this project).
+
+## 2026-08-06 — history rewrite
+
+10. **Git history rewritten** (git-filter-repo, run by the owner; two passes) to replace all
+    environment-specific values — hostnames, LAN addresses, cluster identifiers, database role
+    names — with placeholders across every blob and commit message. Force-pushed with the
+    branch protection ruleset lifted for the push and restored immediately after. All 18
+    commits re-hashed; working tree and test suite unaffected.
