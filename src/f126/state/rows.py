@@ -174,6 +174,9 @@ class RowBuilder:
         self._generation = generation
         self._telemetry_decimator.reset()
         self._wear_decimator.reset()
+        # A flashback rewinds tyre wear; the abandoned timeline's peak would overstate
+        # the stint's real end wear. Re-seed from post-rewind damage packets.
+        self._stint_wear_peak = None
         if abs(rewind_to_session_time - self._last_flbk_t) > _FLBK_DEDUPE_S:
             self._last_flbk_t = rewind_to_session_time
             self._emit_event_row(
@@ -303,6 +306,7 @@ class RowBuilder:
         self._stint: dict[str, Any] | None = None
         self._stint_no = 0
         self._stint_age = 0
+        self._stint_wear_peak: list[float] | None = None
         self._last_flbk_t = -1e9
 
     def _emit(self, table: str, row: dict[str, Any]) -> None:
@@ -471,6 +475,19 @@ class RowBuilder:
         key = self._key
         assert key is not None
         self._damage = view
+        # Wear at stint close cannot be read from the live damage view: CarDamage (10 Hz)
+        # shows the incoming set's near-zero wear before CarStatus (60 Hz) reveals the
+        # compound swap, so the close would record the new tyres. Track the outgoing set's
+        # true final wear as a running per-wheel maximum instead — within one set's life
+        # wear only rises, and the incoming set's zeros can never win a max().
+        current = wheels(view.tyre_wear_pct)
+        if current is not None:
+            peak = self._stint_wear_peak
+            self._stint_wear_peak = (
+                current
+                if peak is None
+                else [max(a, b) for a, b in zip(peak, current, strict=True)]
+            )
         row = {
             "session_key_uid": key.uid_str,
             "segment": key.segment,
@@ -598,12 +615,18 @@ class RowBuilder:
             "stint_no": self._stint_no,
             "lap_start": max(1, self._player_lap),
         }
+        # Not seeded from self._damage: after a garage swap that view is the OLD set's
+        # stale wear (the stream pauses in menus) and would poison the fresh set's peak.
+        # The next CarDamage packet seeds it with the fitted set's real value.
+        self._stint_wear_peak = None
         self._emit_stint_row(lap_end=None, wear=None, end_reason=None)
 
     def _close_stint(self, end_reason: str) -> None:
         if self._stint is None:
             return
-        wear = wheels(self._damage.tyre_wear_pct) if self._damage is not None else None
+        wear = self._stint_wear_peak
+        if wear is None and self._damage is not None:
+            wear = wheels(self._damage.tyre_wear_pct)
         self._emit_stint_row(
             lap_end=self._player_lap or None,
             wear={"tyre_wear_pct": wear} if wear is not None else None,

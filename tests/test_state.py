@@ -708,6 +708,35 @@ def test_tyre_stints_open_and_close_on_compound_change() -> None:
     assert stints[-1]["end_reason"] == "session_end"
 
 
+def test_stint_close_wear_survives_damage_reset_before_compound_change() -> None:
+    """Race pit stop: CarDamage (10 Hz) shows the fresh set's zeros before CarStatus
+    (60 Hz) reveals the compound swap. The close must record the outgoing set's peak
+    wear, not whatever the damage view holds at detection time (real capture: session
+    102 stint 1 recorded [0,0,0,0] where the softs had reached ~30%)."""
+    sink = Sink()
+    bundle = build_state(cfg(), emit_row=sink.emit)
+    sim = Sim(uid=1)
+    bundle.feed(sim.packet(PacketId.SESSION, sessionview(), dt=0.0))
+    bundle.feed(sim.packet(PacketId.LAP_DATA, lapview(car(lap=1))))
+    bundle.feed(sim.packet(PacketId.CAR_STATUS, status(compound=16, age=0)))
+    bundle.feed(sim.packet(PacketId.CAR_DAMAGE, damage(wear=30.4)))
+    bundle.feed(sim.packet(PacketId.LAP_DATA, lapview(car(lap=6, pit=1, last=92000))))
+    # The stop: fresh mediums appear in the damage feed first...
+    bundle.feed(sim.packet(PacketId.CAR_DAMAGE, damage(wear=0.1)))
+    # ...and only then does the status feed show the new compound.
+    bundle.feed(sim.packet(PacketId.CAR_STATUS, status(compound=17, age=0)))
+    bundle.feed(sim.packet(PacketId.CAR_DAMAGE, damage(wear=5.0)))
+    bundle.shutdown()
+
+    stints = sink.table("tyre_stints")
+    closes = [row for row in stints if row["end_reason"] is not None]
+    assert closes[0]["end_reason"] == "pit_stop"
+    assert closes[0]["wear_at_end_json"]["tyre_wear_pct"] == [30.4, 30.4, 30.4, 30.4]
+    # The second stint's peak restarts with the new set — no inheritance of the old 30.4.
+    assert closes[1]["end_reason"] == "session_end"
+    assert closes[1]["wear_at_end_json"]["tyre_wear_pct"] == [5.0, 5.0, 5.0, 5.0]
+
+
 def test_event_rows_include_synthetic_flashback() -> None:
     sink = Sink()
     bundle = build_state(cfg(), emit_row=sink.emit)
