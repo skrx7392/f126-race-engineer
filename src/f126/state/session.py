@@ -303,6 +303,7 @@ class _ClosedSession:
 class TrackerStats:
     packets: int = 0
     discarded: int = 0
+    menu_ignored: int = 0
     sessions_opened: int = 0
     segments: int = 0
     generations: int = 0
@@ -359,6 +360,7 @@ class SessionTracker:
         return {
             "packets_total": self.counters.packets,
             "discarded_total": self.counters.discarded,
+            "menu_ignored_total": self.counters.menu_ignored,
             "sessions_opened_total": self.counters.sessions_opened,
             "segments_total": self.counters.segments,
             "generations_total": self.counters.generations,
@@ -391,6 +393,18 @@ class SessionTracker:
     def feed(self, pkt: ParsedPacket) -> bool:
         """Absorb one parsed packet. Returns False when the packet was discarded."""
         header = pkt.header
+
+        # Menus and loading screens emit packets with sessionUID 0. They are not
+        # sessions: opening one would fragment the real session around it (every
+        # real->menu->real bounce forced a close + reopen-as-segment) and adopt
+        # the menu's SessionHistory as phantom laps under a ghost session row.
+        # The raw log upstream still captures these bytes; the lifecycle ignores
+        # them, which also means menu time reads as STALLED on the dashboard —
+        # accurate, since no drivable session is running.
+        if header.session_uid == 0:
+            self.counters.menu_ignored += 1
+            return False
+
         new_uid = self.key is None or header.session_uid != self.key.session_uid
 
         # Reorder guard. Skipped across a uid change because overall_frame_identifier

@@ -821,3 +821,30 @@ def test_stats_are_flat_and_metrics_ready() -> None:
     assert stats["events_dropped_total"] == 0
     # /metrics only renders flat scalars.
     assert all(isinstance(value, int | float | str) for value in stats.values())
+
+
+def test_uid_zero_menu_packets_are_ignored() -> None:
+    """Menu/loading packets (sessionUID 0) must not open, close, or fragment
+    sessions — the exact failure that produced phantom session rows in prod."""
+    tracker, rec = tracker_with_recorder()
+    menu = Sim(uid=0)
+    assert tracker.feed(menu.packet(PacketId.SESSION, sessionview())) is False
+    assert tracker.key is None
+    assert rec.opens == []
+    assert tracker.stats()["menu_ignored_total"] == 1
+
+    # Real session opens normally after menu noise…
+    real = Sim(uid=42)
+    tracker.feed(real.packet(PacketId.SESSION, sessionview()))
+    assert tracker.key == SessionKey(42, 0)
+
+    # …menu noise mid-session neither closes nor segments it…
+    tracker.feed(menu.packet(PacketId.SESSION, sessionview()))
+    assert tracker.key == SessionKey(42, 0)
+    assert rec.closes == []
+    assert rec.segments == []
+
+    # …and the same real session continuing afterwards is still segment 0.
+    tracker.feed(real.packet(PacketId.LAP_DATA, None))
+    assert tracker.key == SessionKey(42, 0)
+    assert tracker.stats()["menu_ignored_total"] == 2

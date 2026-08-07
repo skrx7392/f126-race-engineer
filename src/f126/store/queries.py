@@ -29,13 +29,50 @@ _BEST_LAP = """(SELECT min(latest.lap_time_ms) FROM (
             WHERE latest.valid AND latest.lap_time_ms > 0)"""
 
 _SESSION_LIST_SQL = f"""
-    SELECT s.*,
-           {_LAP_COUNT} AS lap_count,
-           {_BEST_LAP} AS best_lap_ms,
-           (SELECT p.name FROM participants p
-             WHERE p.session_id = s.id AND p.is_player LIMIT 1) AS player_name
-      FROM sessions s
-     ORDER BY s.started_at_wall DESC NULLS LAST, s.id DESC
+    WITH seg AS (
+        SELECT s.*,
+               {_LAP_COUNT} AS lap_count,
+               (SELECT count(DISTINCT (l.car_index, l.lap_number)) FROM laps l
+                 WHERE l.session_id = s.id AND l.car_index = s.player_car_index)
+                   AS player_lap_count,
+               {_BEST_LAP} AS best_lap_ms,
+               (SELECT p.name FROM participants p
+                 WHERE p.session_id = s.id AND p.is_player LIMIT 1) AS player_name
+          FROM sessions s
+         WHERE s.session_uid <> '0'
+    ),
+    -- One game session can span several segment rows (pauses, process restarts).
+    -- The representative row is the segment with the most laps: that is the one
+    -- whose id the detail/analysis endpoints should be pointed at.
+    rep AS (
+        SELECT DISTINCT ON (session_uid) *
+          FROM seg
+         ORDER BY session_uid, lap_count DESC NULLS LAST, id DESC
+    ),
+    agg AS (
+        SELECT session_uid,
+               count(*) AS segments,
+               min(started_at_wall) AS first_started_at_wall,
+               max(ended_at_wall) AS last_ended_at_wall,
+               -- Segments re-report the same session history, so MAX (not SUM)
+               -- is the honest cross-segment aggregate.
+               max(lap_count) AS lap_count,
+               max(player_lap_count) AS player_lap_count,
+               min(best_lap_ms) AS best_lap_ms
+          FROM seg
+         GROUP BY session_uid
+    )
+    SELECT rep.id, rep.session_uid, rep.segment, rep.packet_format, rep.session_type,
+           rep.session_type_name, rep.track_id, rep.track_name, rep.ended_reason,
+           rep.joined_in_progress, rep.player_car_index, rep.total_laps,
+           rep.session_duration_s, rep.weather_json, rep.raw_file, rep.player_name,
+           agg.segments,
+           agg.first_started_at_wall AS started_at_wall,
+           agg.last_ended_at_wall AS ended_at_wall,
+           agg.lap_count, agg.player_lap_count, agg.best_lap_ms
+      FROM rep JOIN agg USING (session_uid)
+     WHERE %s::bool OR coalesce(agg.player_lap_count, 0) > 0 OR coalesce(agg.lap_count, 0) > 0
+     ORDER BY agg.first_started_at_wall DESC NULLS LAST, rep.id DESC
      LIMIT %s
 """
 
@@ -87,10 +124,14 @@ def _fetch(conn: Conn, sql: str, params: tuple[Any, ...]) -> list[JsonRow]:
         return [dict(row) for row in cur.fetchall()]
 
 
-def list_sessions(conn: Conn, limit: int = 50) -> list[JsonRow]:
-    """Most recent sessions first, each with its lap count and the player's name."""
+def list_sessions(conn: Conn, limit: int = 50, *, include_empty: bool = False) -> list[JsonRow]:
+    """Most recent game sessions first — segment rows grouped per session_uid.
+
+    Menu noise is excluded: uid-0 rows never appear, and sessions with zero laps
+    (post-race menu stubs with a real uid) are hidden unless include_empty.
+    """
     limit = max(1, min(int(limit), 500))
-    return _fetch(conn, _SESSION_LIST_SQL, (limit,))
+    return _fetch(conn, _SESSION_LIST_SQL, (include_empty, limit))
 
 
 def session_detail(conn: Conn, session_id: int) -> JsonRow | None:
