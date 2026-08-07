@@ -538,6 +538,80 @@ def latest_race_laps_at_track(conn: Conn, track_id: int) -> JsonRow | None:
     return rows[0] if rows else None
 
 
+# --------------------------------------------------------------------------------------
+# Phase 3 career reads (f126.analysis.career / f126.web.career_routes)
+#
+# Career-wide rather than track- or session-scoped: seasons and rounds can only be derived
+# from the whole timeline, so the career endpoints read every session once and hand the
+# rows to `f126.analysis.career`, which is pure. The dedup is the session-list rule
+# (decision 35): one row per session_uid, representative segment first, menu stubs hidden —
+# a race split across recorder segments must count its points once.
+# --------------------------------------------------------------------------------------
+
+_CAREER_SESSIONS_SQL = f"""
+    WITH seg AS (
+        SELECT s.id, s.session_uid, s.segment, s.session_type, s.session_type_name,
+               s.track_id, s.track_name, s.total_laps, s.started_at_wall, s.ended_at_wall,
+               {_PLAYER_CAR} AS player_car_index,
+               {_LAP_COUNT} AS lap_count,
+               (SELECT count(DISTINCT l.lap_number) FROM laps l
+                 WHERE l.session_id = s.id AND l.car_index = {_PLAYER_CAR})
+                   AS player_lap_count
+          FROM sessions s
+         WHERE s.session_uid <> '0'
+    ),
+    rep AS (
+        SELECT DISTINCT ON (session_uid) *
+          FROM seg
+         ORDER BY session_uid, (track_id >= 0 AND session_type > 0) DESC,
+                  lap_count DESC NULLS LAST, id DESC
+    ),
+    agg AS (
+        SELECT session_uid,
+               min(started_at_wall) AS first_started_at_wall,
+               max(ended_at_wall) AS last_ended_at_wall,
+               max(lap_count) AS lap_count,
+               max(player_lap_count) AS player_lap_count
+          FROM seg
+         GROUP BY session_uid
+    )
+    SELECT rep.id, rep.session_uid, rep.session_type, rep.session_type_name,
+           rep.track_id, rep.track_name, rep.total_laps, rep.player_car_index,
+           agg.first_started_at_wall AS started_at_wall,
+           agg.last_ended_at_wall AS ended_at_wall,
+           agg.lap_count, agg.player_lap_count,
+           -- The classification lands on whichever segment saw the flag, which is not
+           -- necessarily the representative one; take the newest segment that has it.
+           (SELECT c.final_classification_json FROM sessions c
+             WHERE c.session_uid = rep.session_uid
+               AND c.final_classification_json IS NOT NULL
+             ORDER BY c.id DESC LIMIT 1) AS final_classification_json
+      FROM rep JOIN agg USING (session_uid)
+     WHERE coalesce(agg.player_lap_count, 0) > 0 OR coalesce(agg.lap_count, 0) > 0
+     ORDER BY agg.first_started_at_wall NULLS LAST, rep.id
+     LIMIT %s
+"""
+
+_CAREER_TAGS_SQL = """
+    SELECT session_uid, season, round, note, updated_at
+      FROM career_tags
+     ORDER BY session_uid
+"""
+
+
+def career_sessions(conn: Conn, *, limit: int = 2_000) -> list[JsonRow]:
+    """Every recorded game session, oldest first, with its classification attached.
+
+    Bounded like every other unauthenticated read; 2000 sessions is several full careers.
+    """
+    return _fetch(conn, _CAREER_SESSIONS_SQL, (max(1, int(limit)),))
+
+
+def career_tags(conn: Conn) -> list[JsonRow]:
+    """Every `f126 tag` pin, in a stable order. Empty when nothing was ever pinned."""
+    return _fetch(conn, _CAREER_TAGS_SQL, ())
+
+
 def latest_debrief(conn: Conn, session_id: int) -> JsonRow | None:
     """The most recent debrief for one session, or None when none has been generated."""
     rows = _fetch(conn, _LATEST_DEBRIEF_SQL, (session_id,))

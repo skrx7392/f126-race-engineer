@@ -2,11 +2,19 @@ import { describe, it, expect } from 'vitest';
 import {
   BAHRAIN_LENGTH_M,
   BAHRAIN_TRACK_ID,
+  BAHRAIN_TT_SESSION_ID,
   HEADLINE_SESSION_ID,
+  MIAMI_GP_SESSION_ID,
+  MIAMI_SPRINT_SESSION_ID,
+  MIAMI_S2_RACE_SESSION_ID,
+  MIAMI_TRACK_ID,
+  MONTREAL_TRACK_ID,
   PLAYER_CAR_INDEX,
   handleMockRequest,
   installAnalysisMock,
   lapTimeMs,
+  mockCareerOverview,
+  mockCareerTrack,
   mockCompare,
   mockCorners,
   mockLaps,
@@ -16,7 +24,14 @@ import {
   mockStints,
   mockTelemetry
 } from '../lib/analysis-mock';
-import type { CompareResponse, CornersResponse, StintsResponse } from '../lib/analysis-api';
+import type {
+  CareerTotals,
+  CareerTrackResponse,
+  CareerWeekend,
+  CompareResponse,
+  CornersResponse,
+  StintsResponse
+} from '../lib/analysis-api';
 
 /**
  * The mock is the only thing the analysis pages see during development, so a
@@ -368,6 +383,221 @@ describe('request routing', () => {
     }
     expect(debrief?.prompt_version).toBe(1);
     expect(debrief?.model).toBeTruthy();
+  });
+});
+
+describe('career derivation behaves like the engine', () => {
+  /** Recompute a totals block from the weekends it claims to summarise. */
+  function recount(weekends: readonly CareerWeekend[]): CareerTotals {
+    const t: CareerTotals = {
+      points: 0,
+      wins: 0,
+      podiums: 0,
+      poles: 0,
+      fastest_laps: 0,
+      sprint_wins: 0,
+      races: 0
+    };
+    for (const w of weekends) {
+      if (w.points !== null) t.points += w.points;
+      if (w.race) {
+        t.races += 1;
+        if (w.race.position === 1) t.wins += 1;
+        if (w.race.position !== null && w.race.position <= 3) t.podiums += 1;
+        if (w.race.fastest_lap === true) t.fastest_laps += 1;
+      }
+      if (w.quali?.position === 1) t.poles += 1;
+      if (w.sprint?.position === 1) t.sprint_wins += 1;
+    }
+    return t;
+  }
+
+  it('groups five weekends into two seasons, incrementing on the track repeat', () => {
+    const overview = mockCareerOverview();
+    expect(overview.seasons.map((s) => s.season)).toEqual([1, 2]);
+    expect(overview.seasons[0]?.rounds).toBe(4);
+    expect(overview.seasons[1]?.rounds).toBe(1);
+
+    // Rounds are the 1-based chronological index within the season.
+    const s1 = overview.seasons[0]!.weekends;
+    expect(s1.map((w) => w.round)).toEqual([1, 2, 3, 4]);
+    const starts = s1.map((w) => w.started_at_wall ?? 0);
+    expect([...starts].sort((a, b) => a - b)).toEqual(starts);
+
+    // Season 2 exists because a circuit repeated, and it is that circuit.
+    const s2 = overview.seasons[1]!.weekends[0]!;
+    expect(s2.track_id).toBe(MIAMI_TRACK_ID);
+    expect(s1.some((w) => w.track_id === MIAMI_TRACK_ID)).toBe(true);
+  });
+
+  it('builds a weekend from the consecutive same-track run, time trials excluded', () => {
+    const overview = mockCareerOverview();
+    const weekends = overview.seasons.flatMap((s) => s.weekends);
+
+    const miami = weekends.find((w) => w.season === 1 && w.track_id === MIAMI_TRACK_ID)!;
+    expect(miami.session_ids).toEqual([6, 7, 8, 9, 10]);
+    expect(miami.sessions).toHaveLength(5);
+
+    // The Bahrain time trial sits chronologically inside the weekend and is
+    // still not part of it: not a career session.
+    const bahrain = weekends.find((w) => w.track_id === BAHRAIN_TRACK_ID)!;
+    expect(bahrain.session_ids).not.toContain(BAHRAIN_TT_SESSION_ID);
+    expect(overview.untracked_sessions).toBe(1);
+  });
+
+  it('calls the last race-type session the grand prix and reads poles off quali only', () => {
+    const overview = mockCareerOverview();
+    const miami = overview.seasons[0]!.weekends.find((w) => w.track_id === MIAMI_TRACK_ID)!;
+
+    expect(miami.format).toBe('sprint');
+    expect(miami.race?.session_id).toBe(MIAMI_GP_SESSION_ID);
+    expect(miami.sprint?.session_id).toBe(MIAMI_SPRINT_SESSION_ID);
+    // The shootout classified P1, but it sets the sprint grid, not a pole:
+    // the weekend's quali is the one-shot session and it was P2.
+    expect(miami.quali?.session_id).toBe(9);
+    expect(miami.quali?.position).toBe(2);
+    expect(overview.seasons[0]?.totals.poles).toBe(1);
+    // The sprint win is counted separately from the GP result.
+    expect(miami.sprint?.position).toBe(1);
+    expect(overview.seasons[0]?.totals.sprint_wins).toBe(1);
+  });
+
+  it('keeps every total equal to the sum of what its weekends show', () => {
+    const overview = mockCareerOverview();
+    for (const season of overview.seasons) {
+      expect(season.totals).toEqual(recount(season.weekends));
+    }
+    expect(overview.career_totals).toEqual(
+      recount(overview.seasons.flatMap((s) => s.weekends))
+    );
+    // And the fixture actually exercises the counters.
+    expect(overview.career_totals.points).toBeGreaterThan(0);
+    expect(overview.career_totals.wins).toBeGreaterThan(0);
+    expect(overview.career_totals.podiums).toBeGreaterThan(0);
+  });
+
+  it('shows a race whose classification never landed as nulls, not zeros', () => {
+    const overview = mockCareerOverview();
+    const weekend = overview.seasons[1]!.weekends[0]!;
+
+    expect(weekend.race?.session_id).toBe(MIAMI_S2_RACE_SESSION_ID);
+    expect(weekend.race?.position).toBeNull();
+    expect(weekend.race?.points).toBeNull();
+    expect(weekend.race?.status).toBeNull();
+    expect(weekend.race?.fastest_lap).toBeNull();
+    // The laps were still recorded, so the best lap is a real number.
+    expect(weekend.race?.best_lap_ms).toBeGreaterThan(0);
+    // An unknown is never summed into a points figure.
+    expect(weekend.points).toBeNull();
+  });
+
+  it('keeps a practice-only visit as a round, with nothing invented for it', () => {
+    const overview = mockCareerOverview();
+    const monza = overview.seasons[0]!.weekends.find((w) => w.track_id === 11)!;
+    expect(monza.race).toBeNull();
+    expect(monza.sprint).toBeNull();
+    expect(monza.quali).toBeNull();
+    expect(monza.consistency).toBeNull();
+    // No race-type sessions means zero points scored — a known fact, not a gap.
+    expect(monza.points).toBe(0);
+  });
+
+  it('resolves disagreeing tags newest-first and flags the conflict', () => {
+    const overview = mockCareerOverview();
+    const weekends = overview.seasons.flatMap((s) => s.weekends);
+    const pinned = weekends.filter((w) => w.tags !== null);
+    expect(pinned).toHaveLength(1);
+
+    const weekend = pinned[0]!;
+    expect(weekend.track_id).toBe(MIAMI_TRACK_ID);
+    expect(weekend.tags).toEqual({
+      season: 2,
+      round: 1,
+      note: 'season 2 opener, pinned by hand'
+    });
+    expect(weekend.tag_conflict).toBe(true);
+    expect(weekend.season).toBe(2);
+    expect(weekend.round).toBe(1);
+    for (const other of weekends.filter((w) => w !== weekend)) {
+      expect(other.tag_conflict).toBe(false);
+    }
+  });
+
+  it('credits the Bahrain PB to the time trial and orders the board by first visit', () => {
+    const overview = mockCareerOverview();
+    expect(overview.pbs.map((p) => p.track_id)).toEqual([
+      MIAMI_TRACK_ID,
+      MONTREAL_TRACK_ID,
+      11,
+      BAHRAIN_TRACK_ID
+    ]);
+
+    const bahrain = overview.pbs.find((p) => p.track_id === BAHRAIN_TRACK_ID)!;
+    expect(bahrain.session_id).toBe(BAHRAIN_TT_SESSION_ID);
+    expect(bahrain.best_lap_ms).toBeGreaterThan(0);
+  });
+
+  it('derives a theoretical best that can never beat itself', () => {
+    const overview = mockCareerOverview();
+    for (const pb of overview.pbs) {
+      expect(pb.best_lap_ms).toBeGreaterThan(0);
+      expect(pb.theoretical_ms).not.toBeNull();
+      // Best sectors can only equal the best lap's own, give or take the
+      // per-sector rounding the lap fixtures already tolerate.
+      expect(pb.theoretical_ms!).toBeLessThanOrEqual(pb.best_lap_ms! + 3);
+      expect(pb.top_speed_kmh).toBeGreaterThan(0);
+    }
+  });
+
+  it('serves a track page whose visits agree with the overview', () => {
+    const overview = mockCareerOverview();
+    const track = mockCareerTrack(MIAMI_TRACK_ID) as CareerTrackResponse;
+
+    expect(track.visits.map((v) => [v.season, v.round])).toEqual([
+      [1, 1],
+      [2, 1]
+    ]);
+    const fromOverview = overview.seasons
+      .flatMap((s) => s.weekends)
+      .filter((w) => w.track_id === MIAMI_TRACK_ID);
+    track.visits.forEach((visit, i) => {
+      expect(visit.session_ids).toEqual(fromOverview[i]!.session_ids);
+      expect(visit.race).toEqual(fromOverview[i]!.race);
+    });
+
+    // The career progressed: the second visit is quicker than the first.
+    expect(track.visits[1]!.best_lap_ms!).toBeLessThan(track.visits[0]!.best_lap_ms!);
+
+    // Sector PBs are the parts the theoretical best is the sum of.
+    const sectors = track.pb!.sectors!;
+    expect(sectors.s1_ms! + sectors.s2_ms! + sectors.s3_ms!).toBe(track.pb!.theoretical_ms);
+    for (const sid of [sectors.s1_session_id, sectors.s2_session_id, sectors.s3_session_id]) {
+      expect(track.sessions.some((s) => s.id === sid)).toBe(true);
+    }
+  });
+
+  it('lists every session at the circuit, time trial included, chronologically', () => {
+    const track = mockCareerTrack(BAHRAIN_TRACK_ID) as CareerTrackResponse;
+    expect(track.sessions.map((s) => s.id)).toEqual([BAHRAIN_TT_SESSION_ID, 2, 3]);
+    // The visit still excludes it.
+    expect(track.visits).toHaveLength(1);
+    expect(track.visits[0]!.session_ids).toEqual([2, 3]);
+    // Per-session consistency carries real numbers where laps exist.
+    for (const session of track.sessions) {
+      expect(session.laps_used).toBeGreaterThan(0);
+      expect(session.median_ms).toBeGreaterThan(0);
+      expect(session.cv_pct).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('404s a circuit with no sessions', () => {
+    expect(mockCareerTrack(999)).toMatchObject({ status: 404 });
+  });
+
+  it('routes both career endpoints', () => {
+    expect(handleMockRequest('/api/career/overview')?.status).toBe(200);
+    expect(handleMockRequest(`/api/career/tracks/${MIAMI_TRACK_ID}`)?.status).toBe(200);
+    expect(handleMockRequest('/api/career/tracks/999')?.status).toBe(404);
   });
 });
 

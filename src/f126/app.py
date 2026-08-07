@@ -584,3 +584,90 @@ def run_debrief(cfg: Config, session_id: int, *, regenerate: bool = False) -> in
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     return asyncio.run(_debrief_async(cfg, session_id, regenerate))
+
+
+def run_tag(
+    cfg: Config,
+    session_id: int | None,
+    *,
+    season: int | None = None,
+    round_no: int | None = None,
+    note: str | None = None,
+    clear: bool = False,
+    list_tags: bool = False,
+) -> int:
+    """`f126 tag` — pin, clear or list career season/round overrides.
+
+    `career_tags` is the one hand-written table in the database and this is its only
+    writer: the HTTP surface is read-only by project invariant, so the mutation path is
+    the CLI, on the same DSN serve and backfill use. The tag keys on the game's
+    `session_uid`, which is why it survives a backfill dropping and re-deriving every
+    session row.
+
+    Synchronous on purpose — one connection, one statement, nothing to schedule.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    from f126.store import queries  # noqa: PLC0415
+    from f126.store.writer import delete_career_tag, upsert_career_tag  # noqa: PLC0415
+
+    if not cfg.database_url:
+        log.error("tag requires F126_DATABASE_URL")
+        return 1
+
+    if list_tags:
+        if session_id is not None or clear or season is not None:
+            log.error("--list takes no session id and no other options")
+            return 2
+        with store_db.connect(cfg.database_url) as conn:
+            rows = queries.career_tags(conn)
+            for row in rows:
+                resolved = queries.session_id_for_key(conn, str(row["session_uid"]))
+                line = (
+                    f"session {resolved if resolved is not None else '?'}"
+                    f"  uid {row['session_uid']}"
+                    f"  season {row['season']}"
+                    f"  round {row['round'] if row['round'] is not None else '-'}"
+                )
+                if row.get("note"):
+                    line += f"  {row['note']}"
+                print(line)
+        if not rows:
+            print("no career tags")
+        return 0
+
+    if session_id is None:
+        log.error("tag needs a session id (or --list)")
+        return 2
+    if clear and (season is not None or round_no is not None or note is not None):
+        log.error("--clear replaces the tag with nothing; it takes no --season/--round/--note")
+        return 2
+    if not clear and season is None:
+        log.error("tag needs --season (or --clear to remove the tag)")
+        return 2
+    if (season is not None and season < 1) or (round_no is not None and round_no < 1):
+        log.error("season and round are 1-based")
+        return 2
+
+    with store_db.connect(cfg.database_url) as conn:
+        summary = queries.session_summary(conn, session_id)
+        if summary is None:
+            log.error("session %s not found", session_id)
+            return 1
+        uid = str(summary["session_uid"])
+        if clear:
+            if delete_career_tag(conn, uid):
+                print(f"cleared tag for session {session_id} (uid {uid})")
+            else:
+                print(f"session {session_id} (uid {uid}) had no tag")
+            return 0
+        upsert_career_tag(
+            conn,
+            uid,
+            season=season,
+            round_no=round_no,
+            note=note,
+            updated_at=time.time(),
+        )
+        pinned = f"season {season}" if round_no is None else f"season {season}, round {round_no}"
+        print(f"tagged session {session_id} (uid {uid}): {pinned}")
+    return 0

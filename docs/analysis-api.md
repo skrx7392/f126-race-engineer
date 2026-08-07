@@ -1,4 +1,4 @@
-# Phase 2 analysis API — contract
+# Analysis API — contract (Phases 2–3)
 
 Read-only GET endpoints (the project invariant: no mutating HTTP surface, ever). All under
 `/api`. JSON responses; times ms, distances metres, speeds km/h unless suffixed. `null` =
@@ -255,6 +255,110 @@ happens in the serve process when a session closes with reason `finished` (a fir
 task off the capture path, skipped when the feature is unconfigured), and on demand from
 `f126 debrief <session_id> [--regenerate]`.
 
+## Phase 3 — career (season progress, per-track evolution, PBs)
+
+Career sessions are grouped into **weekends** and **seasons** with no manual input, and a
+`career_tags` table (keyed by `session_uid`, so a backfill re-derivation never loses it;
+written only by `f126 tag`, never by HTTP) can pin a season/round where the derivation is
+wrong. Derivation rules, stated here and in the payload:
+
+* Sessions considered: one per `session_uid` (the session-list dedup rule), `track_id >= 0`,
+  time-trial sessions excluded (they are not career rounds; they still count for PBs).
+* **Weekend** = maximal chronological run of sessions sharing `track_id`, split when the gap
+  between consecutive sessions there exceeds 48 h.
+* **Round** = 1-based chronological index of the weekend within its season.
+* **Season** starts at 1 and increments when a weekend starts at a `track_id` already
+  visited that season (a 24-round career never repeats a circuit inside one season).
+* A tag on any session pins its weekend's `(season, round)`; later weekends derive forward
+  from the pinned value. Disagreeing tags inside one weekend: newest `updated_at` wins and
+  the weekend carries `tag_conflict: true`.
+* In a weekend with more than one race-type session (15–17), the **last is the grand prix**
+  (`race`), the earlier ones are sprints (`sprint` is the last of those); with exactly one,
+  it is the `race`. `quali` is the weekend's last session of type 5–9 (the GP qualifying —
+  shootouts 10–14 set the sprint grid and are not poles).
+* Totals: `points` sums the game's classification points over race-type sessions (sprint
+  included); `wins`/`podiums`/`fastest_laps` count the GP only; `sprint_wins` is separate;
+  `poles` = `quali.position == 1`. Nothing is inferred when a classification packet is
+  missing — those fields are `null` and the session still appears.
+* **Consistency** = the representative-lap rule the fact sheet already uses (valid,
+  non-in/out, non-excluded, within 107 % of the median): `laps_used`, `median_ms`,
+  `iqr_ms`, and `cv_pct` (sample stdev / mean × 100). Race laps for a weekend's headline
+  figure; per-session on the track page.
+
+### `GET /api/career/overview`
+```json
+{"seasons": [
+  {"season": 1, "rounds": 4,
+   "totals": {"points": 73, "wins": 2, "podiums": 3, "poles": 3, "fastest_laps": 1,
+              "sprint_wins": 2, "races": 4},
+   "weekends": [
+     {"season": 1, "round": 2, "track_id": 30, "track_name": "Miami",
+      "format": "sprint",                    // "sprint" | "standard"
+      "started_at_wall": 1786100000.0, "ended_at_wall": 1786140000.0,
+      "session_ids": [180, 196, 210, 229, 240],
+      "sessions": [{"id": 180, "session_type": 1, "session_type_name": "Practice 1",
+                    "started_at_wall": 1786100000.0, "best_lap_ms": 89012}, ...],
+      "quali":  {"session_id": 210, "position": 1, "best_lap_ms": 87274},
+      "sprint": {"session_id": 196, "position": 1, "grid_position": 12, "points": 8,
+                 "status": "finished"},
+      "race":   {"session_id": 229, "position": 1, "grid_position": 1, "points": 25,
+                 "pit_stops": 1, "best_lap_ms": 88643, "fastest_lap": true,
+                 "status": "finished"},
+      "points": 33,
+      "consistency": {"session_id": 229, "laps_used": 11, "median_ms": 89120,
+                      "iqr_ms": 410, "cv_pct": 0.38},
+      "tags": null,                          // or {"season": 1, "round": 2, "note": "..."}
+      "tag_conflict": false},
+     ...]}],
+ "career_totals": { ...same shape as totals, summed over seasons... },
+ "pbs": [
+   {"track_id": 30, "track_name": "Miami", "best_lap_ms": 87274, "session_id": 210,
+    "session_label": "One-Shot Qualifying · Aug 07", "lap_number": 1,
+    "compound_visual": 16, "compound_name": "Soft", "set_at_wall": 1786120000.0,
+    "theoretical_ms": 87100, "top_speed_kmh": 342.0},
+   ...],
+ "untracked_sessions": 2,
+ "notes": {"weekend_rule": "...", "season_rule": "..."}}
+```
+`pbs` covers every circuit with laps (time trial included), fastest first by nothing —
+track order is chronological first-visit. `theoretical_ms` is the sum of the circuit's best
+valid sectors, `null` when any sector is missing. Weekends are chronological within a
+season; seasons ascend. 503 if the DB is down; an empty database returns empty arrays, not
+an error.
+
+### `GET /api/career/tracks/{track_id}`
+Per-track progress: every visit, every session, and the PB detail. **404** when the circuit
+has no sessions; `track_id >= 0` as everywhere else.
+```json
+{"track_id": 30, "track_name": "Miami",
+ "pb": { ...the overview `pbs` entry..., 
+   "sectors": {"s1_ms": 28450, "s1_session_id": 210, "s1_lap_number": 1,
+               "s2_ms": ..., "s2_session_id": ..., "s2_lap_number": ...,
+               "s3_ms": ..., "s3_session_id": ..., "s3_lap_number": ...}},
+ "visits": [
+   {"season": 1, "round": 2, "started_at_wall": 1786100000.0,
+    "session_ids": [180, 196, 210, 229],
+    "best_lap_ms": 87274, "best_lap_session_id": 210,
+    "quali": {...}, "sprint": {...}, "race": {...},        // same shapes as overview
+    "consistency": {...}},
+   ...],
+ "sessions": [
+   {"id": 180, "session_type": 1, "session_type_name": "Practice 1",
+    "started_at_wall": 1786100000.0, "best_lap_ms": 89012, "laps_total": 9,
+    "laps_used": 6, "median_ms": 89500, "iqr_ms": 620, "cv_pct": 0.55,
+    "top_speed_kmh": 341.0},
+   ...]}
+```
+`visits` are the career weekends at this circuit (chart series come from here — the page
+derives them, the payload does not duplicate them); `sessions` is every session at the
+circuit including time trials, chronological, with per-session consistency.
+
+### `f126 tag` (CLI, not HTTP)
+`f126 tag <session_id> --season N [--round M] [--note TEXT]` upserts the row for that
+session's `session_uid`; `f126 tag <session_id> --clear` deletes it; `f126 tag --list`
+prints every tag. Direct database write from the CLI, same DSN the service uses — the HTTP
+surface stays read-only.
+
 ## Frontend pages (SPA routes, consuming the above)
 - `#/sessions` — session browser: table (date, track, type, laps, best lap), newest first.
 - `#/sessions/{id}` — detail: lap table per car (player default), lap-time chart, stint strip;
@@ -275,6 +379,15 @@ task off the capture path, skipped when the feature is unconfigured), and on dem
   footer states the circuit's coefficient and the assumption it rests on.
   Track-scoped, not session-scoped: the picker lists circuits that have sessions, and both
   the sessions browser and the session detail page link into it by track.
+- `#/career` — season overview: a totals strip (points, wins, podiums, poles, fastest laps,
+  sprint wins) per season and career-wide, a chronological weekend table (round, track,
+  format badge, quali/sprint/race results, points, race consistency) linking each row to
+  its track page, and the PB board (per circuit: best lap, compound, theoretical best, top
+  speed). Derivation notes are shown, not hidden — the season/round numbers are computed
+  and the page says by what rule; a pinned tag is marked.
+- `#/career/tracks/{track_id}` — one circuit's progress: PB card with the three best
+  sectors and where each was set, a uPlot evolution chart of best and median lap per visit
+  (x = "S1 R2"-style visit labels), the visit table, and the per-session consistency table.
 Live pit wall stays the default route (`#/` = current behavior, untouched).
 
 The session detail page also carries a collapsible **Debrief** card above the instruments,

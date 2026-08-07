@@ -28,6 +28,20 @@
  */
 
 import type {
+  CareerConsistency,
+  CareerOverview,
+  CareerPb,
+  CareerPbSectors,
+  CareerQualiResult,
+  CareerRaceResult,
+  CareerSeason,
+  CareerSprintResult,
+  CareerTag,
+  CareerTotals,
+  CareerTrackResponse,
+  CareerTrackSession,
+  CareerVisit,
+  CareerWeekend,
   CompareResponse,
   CompareSide,
   Corner,
@@ -460,6 +474,20 @@ const MONTREAL_RACE_LAPS = 14;
 /** Wall-clock anchor. Fixed, so the fixture is byte-identical between runs. */
 const BASE_WALL = 1_771_000_000;
 
+/**
+ * The game's final-classification packet, reduced to what the career pages
+ * read. Absent from a seed means the packet never landed for that session —
+ * the ordinary way a recording ends early — and every derived field is null.
+ */
+interface RaceClassification {
+  position: number;
+  grid_position: number;
+  points: number;
+  pit_stops: number;
+  status: string;
+  fastest_lap: boolean;
+}
+
 interface SessionSeed {
   id: number;
   type: number;
@@ -470,7 +498,34 @@ interface SessionSeed {
   startedOffset: number;
   durationS: number;
   totalLaps: number | null;
+  /** Per-lap offset against the shared Bahrain lap model, in ms. */
+  lapOffsetMs?: number;
+  /** Race-type sessions only; absent = no classification was recorded. */
+  classification?: RaceClassification;
+  /** Quali-type sessions: the classified position (poles come from these). */
+  qualiPosition?: number;
 }
+
+/**
+ * A third circuit, existing purely for the career fixture.
+ *
+ * Miami is the sprint-format weekend (season 1, round 1) and — because it is the
+ * first circuit the career revisits — the weekend that starts season 2. Its
+ * second visit is also the one whose race never recorded a classification, and
+ * the one carrying the pinned (and conflicting) tags, so every marked state the
+ * career page can show is reachable in `dev:mock`.
+ */
+export const MIAMI_TRACK_ID = 30;
+const MIAMI_P1_SESSION_ID = 6;
+const MIAMI_SHOOTOUT_SESSION_ID = 7;
+export const MIAMI_SPRINT_SESSION_ID = 8;
+const MIAMI_OSQ_SESSION_ID = 9;
+export const MIAMI_GP_SESSION_ID = 10;
+export const MIAMI_S2_QUALI_SESSION_ID = 11;
+/** The race whose classification packet never landed: every result field null. */
+export const MIAMI_S2_RACE_SESSION_ID = 12;
+/** Time trial: excluded from career rounds, still sets the Bahrain PB. */
+export const BAHRAIN_TT_SESSION_ID = 13;
 
 const SESSION_SEEDS: readonly SessionSeed[] = [
   {
@@ -482,7 +537,16 @@ const SESSION_SEEDS: readonly SessionSeed[] = [
     laps: LAP_COUNT,
     startedOffset: 0,
     durationS: 5400,
-    totalLaps: LAP_COUNT
+    totalLaps: LAP_COUNT,
+    // The numbers the debrief fixture narrates: P4 from P6, 12 points, one stop.
+    classification: {
+      position: 4,
+      grid_position: 6,
+      points: 12,
+      pit_stops: 1,
+      status: 'finished',
+      fastest_lap: false
+    }
   },
   {
     id: QUALI_SESSION_ID,
@@ -493,7 +557,9 @@ const SESSION_SEEDS: readonly SessionSeed[] = [
     laps: 8,
     startedOffset: -7200,
     durationS: 720,
-    totalLaps: null
+    totalLaps: null,
+    lapOffsetMs: -1_250,
+    qualiPosition: 1
   },
   {
     id: OTHER_TRACK_SESSION_ID,
@@ -504,7 +570,8 @@ const SESSION_SEEDS: readonly SessionSeed[] = [
     laps: 12,
     startedOffset: -172_800,
     durationS: 3600,
-    totalLaps: null
+    totalLaps: null,
+    lapOffsetMs: 8_400
   },
   {
     id: MONTREAL_RACE_SESSION_ID,
@@ -515,7 +582,15 @@ const SESSION_SEEDS: readonly SessionSeed[] = [
     laps: MONTREAL_RACE_LAPS,
     startedOffset: -601_200,
     durationS: 3600,
-    totalLaps: MONTREAL_RACE_LAPS
+    totalLaps: MONTREAL_RACE_LAPS,
+    classification: {
+      position: 1,
+      grid_position: 3,
+      points: 25,
+      pit_stops: 1,
+      status: 'finished',
+      fastest_lap: false
+    }
   },
   {
     id: MONTREAL_PRACTICE_SESSION_ID,
@@ -527,6 +602,130 @@ const SESSION_SEEDS: readonly SessionSeed[] = [
     startedOffset: -604_800,
     durationS: 3600,
     totalLaps: null
+  },
+
+  // ── the career fixture's own weekends ──────────────────────────────────────
+  // Season 1, round 1: the sprint-format Miami weekend. The shootout (type 12)
+  // classifies P1 on purpose — shootouts set the sprint grid, and the poles
+  // count must ignore it in favour of the one-shot qualifying's P2.
+  {
+    id: MIAMI_P1_SESSION_ID,
+    type: 1,
+    typeName: 'Practice 1',
+    trackId: MIAMI_TRACK_ID,
+    trackName: 'Miami',
+    laps: 10,
+    startedOffset: -1_296_000,
+    durationS: 3600,
+    totalLaps: null
+  },
+  {
+    id: MIAMI_SHOOTOUT_SESSION_ID,
+    type: 12,
+    typeName: 'Sprint Shootout',
+    trackId: MIAMI_TRACK_ID,
+    trackName: 'Miami',
+    laps: 5,
+    startedOffset: -1_209_600,
+    durationS: 1800,
+    totalLaps: null,
+    lapOffsetMs: -900,
+    qualiPosition: 1
+  },
+  {
+    id: MIAMI_SPRINT_SESSION_ID,
+    type: 15,
+    typeName: 'Sprint',
+    trackId: MIAMI_TRACK_ID,
+    trackName: 'Miami',
+    laps: 8,
+    startedOffset: -1_206_000,
+    durationS: 1800,
+    totalLaps: 8,
+    classification: {
+      position: 1,
+      grid_position: 3,
+      points: 8,
+      pit_stops: 0,
+      status: 'finished',
+      fastest_lap: false
+    }
+  },
+  {
+    id: MIAMI_OSQ_SESSION_ID,
+    type: 9,
+    typeName: 'One-Shot Qualifying',
+    trackId: MIAMI_TRACK_ID,
+    trackName: 'Miami',
+    laps: 4,
+    startedOffset: -1_202_400,
+    durationS: 900,
+    totalLaps: null,
+    lapOffsetMs: -1_300,
+    qualiPosition: 2
+  },
+  {
+    id: MIAMI_GP_SESSION_ID,
+    type: 16,
+    typeName: 'Race 2',
+    trackId: MIAMI_TRACK_ID,
+    trackName: 'Miami',
+    laps: 17,
+    startedOffset: -1_198_800,
+    durationS: 5400,
+    totalLaps: 17,
+    classification: {
+      position: 2,
+      grid_position: 2,
+      points: 18,
+      pit_stops: 1,
+      status: 'finished',
+      fastest_lap: true
+    }
+  },
+
+  // Season 2, round 1: Miami again — the repeat is what increments the season.
+  // The quali improves on last visit's pace (career progress the track page's
+  // evolution chart can show); the race recorded no classification at all.
+  {
+    id: MIAMI_S2_QUALI_SESSION_ID,
+    type: 7,
+    typeName: 'Qualifying 3',
+    trackId: MIAMI_TRACK_ID,
+    trackName: 'Miami',
+    laps: 6,
+    startedOffset: 86_400,
+    durationS: 720,
+    totalLaps: null,
+    lapOffsetMs: -1_500,
+    qualiPosition: 1
+  },
+  {
+    id: MIAMI_S2_RACE_SESSION_ID,
+    type: 15,
+    typeName: 'Race',
+    trackId: MIAMI_TRACK_ID,
+    trackName: 'Miami',
+    laps: 17,
+    startedOffset: 90_000,
+    durationS: 5400,
+    totalLaps: 17
+    // No classification: the packet never landed. The session still appears.
+  },
+
+  // A Bahrain time trial the evening before quali: not a career round, but the
+  // quickest thing ever driven there, so the PB board has to credit it.
+  {
+    id: BAHRAIN_TT_SESSION_ID,
+    type: 18,
+    typeName: 'Time Trial',
+    trackId: BAHRAIN_TRACK_ID,
+    trackName: 'Bahrain',
+    laps: 6,
+    startedOffset: -90_000,
+    durationS: 1800,
+    totalLaps: null,
+    lapOffsetMs: -2_000
   }
 ];
 
@@ -535,14 +734,13 @@ function seedFor(id: number): SessionSeed | null {
 }
 
 /**
- * Quali and Monza laps are a simple offset of the race model rather than their
- * own simulation. They exist to populate the session browser and the
- * cross-session lap picker, and nothing plots them in anger.
+ * Every non-headline session's laps are a simple offset of the race model
+ * rather than their own simulation (the seed's `lapOffsetMs`). They exist to
+ * populate the session browser, the lap pickers and the career derivation, and
+ * nothing plots them in anger.
  */
 function lapOffsetFor(sessionId: number): number {
-  if (sessionId === QUALI_SESSION_ID) return -1_250;
-  if (sessionId === OTHER_TRACK_SESSION_ID) return 8_400;
-  return 0;
+  return seedFor(sessionId)?.lapOffsetMs ?? 0;
 }
 
 function sessionLapTimeMs(sessionId: number, lap: number, carIndex: number): number {
@@ -1814,7 +2012,8 @@ export function mockStrategy(
     id: s.id,
     session_type: s.type,
     session_type_name: s.typeName,
-    evidence: s.type >= 15 ? 'race' : 'practice',
+    // 15–17 are the races; 18 is a time trial and reads as practice trim.
+    evidence: s.type >= 15 && s.type <= 17 ? 'race' : 'practice',
     started_at_wall: BASE_WALL + s.startedOffset,
     contributed: evidence
       .filter((e) => e.sessionId === s.id)
@@ -1911,6 +2110,490 @@ export function mockStrategy(
         },
     sessions_used: sessionsUsed,
     omitted
+  };
+}
+
+// ── career ───────────────────────────────────────────────────────────────────
+
+/**
+ * The career endpoints, derived rather than transcribed.
+ *
+ * Same rule as the strategy sheet: this is not a canned payload, it is the same
+ * derivation the backend runs — weekends grouped from consecutive same-track
+ * sessions, seasons incremented on a track repeat, the last race-type session
+ * of a weekend treated as the grand prix, poles read off quali (5–9) and never
+ * off a shootout (10–14), and totals summed from the same classifications the
+ * weekends display. So every number the career page shows can be checked
+ * against the weekends beside it, and the marked states — sprint format, a
+ * pinned tag, a tag conflict, a race with no classification — are reachable by
+ * having put those shapes in the session seeds rather than by faking a blob.
+ */
+
+const isRaceType = (t: number): boolean => t >= 15 && t <= 17;
+const isQualiType = (t: number): boolean => t >= 5 && t <= 9;
+const TIME_TRIAL_TYPE = 18;
+
+/** The 48 h gap that splits two same-track runs into two visits. */
+const WEEKEND_SPLIT_S = 48 * 3600;
+
+/** Rows `f126 tag` would have written, keyed by session. Newest wins a conflict. */
+interface CareerTagRow {
+  sessionId: number;
+  season: number;
+  round: number | null;
+  note: string | null;
+  updatedAt: number;
+}
+
+/**
+ * Two disagreeing tags on the season-2 Miami weekend: an older one left over
+ * from an imported save, and a newer hand-written pin that agrees with the
+ * derivation. The newest wins, and the weekend carries `tag_conflict` so the
+ * page can say the older row is still sitting in the table.
+ */
+const CAREER_TAG_ROWS: readonly CareerTagRow[] = [
+  {
+    sessionId: MIAMI_S2_RACE_SESSION_ID,
+    season: 1,
+    round: 5,
+    note: 'imported save, before the season split',
+    updatedAt: BASE_WALL + 100_000
+  },
+  {
+    sessionId: MIAMI_S2_QUALI_SESSION_ID,
+    season: 2,
+    round: 1,
+    note: 'season 2 opener, pinned by hand',
+    updatedAt: BASE_WALL + 200_000
+  }
+];
+
+/** The derivation rules, restated in the payload as the contract requires. */
+const CAREER_NOTES: Record<string, string> = {
+  weekend_rule:
+    'a weekend is a maximal chronological run of sessions at one circuit, split when ' +
+    'consecutive sessions there are more than 48 h apart. Time trials are not career ' +
+    'rounds; they still count for personal bests.',
+  season_rule:
+    'season 1 starts at the first recorded weekend and the season increments when a ' +
+    'weekend begins at a circuit already visited that season. A tag written by f126 tag ' +
+    'pins its weekend, and later weekends derive forward from the pinned value; ' +
+    'disagreeing tags inside one weekend are resolved newest-first and flagged.'
+};
+
+/** Sorted copy of a session's numbers, for the quantile reads below. */
+function quantileSorted(sorted: readonly number[], q: number): number {
+  if (sorted.length === 0) return 0;
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  const f = pos - lo;
+  return (sorted[lo] ?? 0) * (1 - f) + (sorted[hi] ?? 0) * f;
+}
+
+/**
+ * The representative-lap statistics for one session: valid, non-in/out laps
+ * within 107 % of their median — the same rule the fact sheet states. The
+ * fixture's only pit stop is the headline race's, so those are the only in/out
+ * laps there are to drop.
+ */
+function consistencyOf(sessionId: number): CareerConsistency | null {
+  const seed = seedFor(sessionId);
+  if (!seed) return null;
+  const inOut: ReadonlySet<number> =
+    sessionId === HEADLINE_SESSION_ID ? new Set([PIT_IN_LAP, PIT_OUT_LAP]) : new Set();
+
+  const clean: number[] = [];
+  for (let lap = 1; lap <= seed.laps; lap++) {
+    if (INVALID_LAPS.has(lap) || inOut.has(lap)) continue;
+    clean.push(sessionLapTimeMs(sessionId, lap, PLAYER_CAR_INDEX));
+  }
+  if (clean.length === 0) {
+    return { session_id: sessionId, laps_used: 0, median_ms: null, iqr_ms: null, cv_pct: null };
+  }
+
+  const preMedian = quantileSorted([...clean].sort((a, b) => a - b), 0.5);
+  const used = clean.filter((t) => t <= preMedian * 1.07).sort((a, b) => a - b);
+  const median = quantileSorted(used, 0.5);
+  const iqr = quantileSorted(used, 0.75) - quantileSorted(used, 0.25);
+  const mean = used.reduce((a, b) => a + b, 0) / used.length;
+  const variance =
+    used.length > 1
+      ? used.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (used.length - 1)
+      : 0;
+  const cv = mean > 0 ? (Math.sqrt(variance) / mean) * 100 : 0;
+
+  return {
+    session_id: sessionId,
+    laps_used: used.length,
+    median_ms: Math.round(median),
+    iqr_ms: Math.round(iqr),
+    cv_pct: Math.round(cv * 100) / 100
+  };
+}
+
+/** One derived weekend, still in seed form. */
+interface WeekendSeeds {
+  trackId: number;
+  trackName: string;
+  seeds: SessionSeed[];
+  season: number;
+  round: number;
+  tag: CareerTag | null;
+  tagConflict: boolean;
+}
+
+/**
+ * Group the career sessions into weekends and number them.
+ *
+ * Weekend = maximal chronological run of sessions sharing `track_id`, split on
+ * a gap over 48 h. Season increments when a weekend starts at a circuit already
+ * visited that season; a tag pins its weekend's `(season, round)` and later
+ * weekends derive forward from the pinned value.
+ */
+function careerWeekendSeeds(): WeekendSeeds[] {
+  const considered = [...SESSION_SEEDS]
+    .filter((s) => s.trackId >= 0 && s.type !== TIME_TRIAL_TYPE)
+    .sort((a, b) => a.startedOffset - b.startedOffset);
+
+  const weekends: WeekendSeeds[] = [];
+  for (const seed of considered) {
+    const current = weekends[weekends.length - 1];
+    const previous = current?.seeds[current.seeds.length - 1];
+    if (
+      current !== undefined &&
+      previous !== undefined &&
+      current.trackId === seed.trackId &&
+      seed.startedOffset - previous.startedOffset <= WEEKEND_SPLIT_S
+    ) {
+      current.seeds.push(seed);
+    } else {
+      weekends.push({
+        trackId: seed.trackId,
+        trackName: seed.trackName,
+        seeds: [seed],
+        season: 0,
+        round: 0,
+        tag: null,
+        tagConflict: false
+      });
+    }
+  }
+
+  let season = 1;
+  let round = 0;
+  let visited = new Set<number>();
+  for (const weekend of weekends) {
+    let s = visited.has(weekend.trackId) ? season + 1 : season;
+    let r = s === season ? round + 1 : 1;
+
+    const tags = CAREER_TAG_ROWS.filter((t) =>
+      weekend.seeds.some((seed) => seed.id === t.sessionId)
+    ).sort((a, b) => a.updatedAt - b.updatedAt);
+    const winner = tags[tags.length - 1];
+    if (winner) {
+      weekend.tag = { season: winner.season, round: winner.round, note: winner.note };
+      weekend.tagConflict = tags.some(
+        (t) => t.season !== winner.season || t.round !== winner.round
+      );
+      s = winner.season;
+      if (winner.round !== null) r = winner.round;
+      else if (s !== season) r = 1;
+    }
+
+    if (s !== season) visited = new Set();
+    season = s;
+    round = r;
+    visited.add(weekend.trackId);
+    weekend.season = s;
+    weekend.round = r;
+  }
+  return weekends;
+}
+
+function qualiResultOf(seed: SessionSeed): CareerQualiResult {
+  return {
+    session_id: seed.id,
+    position: seed.qualiPosition ?? null,
+    best_lap_ms: bestLapOf(seed.id, seed)
+  };
+}
+
+function sprintResultOf(seed: SessionSeed): CareerSprintResult {
+  return {
+    session_id: seed.id,
+    position: seed.classification?.position ?? null,
+    grid_position: seed.classification?.grid_position ?? null,
+    points: seed.classification?.points ?? null,
+    status: seed.classification?.status ?? null
+  };
+}
+
+function raceResultOf(seed: SessionSeed): CareerRaceResult {
+  return {
+    session_id: seed.id,
+    position: seed.classification?.position ?? null,
+    grid_position: seed.classification?.grid_position ?? null,
+    points: seed.classification?.points ?? null,
+    pit_stops: seed.classification?.pit_stops ?? null,
+    // The best lap comes from the recorded laps, not the classification, so it
+    // survives a missing packet.
+    best_lap_ms: bestLapOf(seed.id, seed),
+    fastest_lap: seed.classification?.fastest_lap ?? null,
+    status: seed.classification?.status ?? null
+  };
+}
+
+function weekendPayload(w: WeekendSeeds): CareerWeekend {
+  const raceSeeds = w.seeds.filter((s) => isRaceType(s.type));
+  // More than one race-type session: the last is the grand prix, the earlier
+  // ones are sprints, and the sprint column shows the last of those.
+  const gp = raceSeeds[raceSeeds.length - 1];
+  const sprint = raceSeeds.length > 1 ? raceSeeds[raceSeeds.length - 2] : undefined;
+  const qualiSeeds = w.seeds.filter((s) => isQualiType(s.type));
+  const quali = qualiSeeds[qualiSeeds.length - 1];
+
+  // Classification points over race-type sessions, sprint included. A missing
+  // classification makes the sum unknowable, and unknown is null — never zero.
+  const points =
+    raceSeeds.length === 0
+      ? 0
+      : raceSeeds.every((s) => s.classification)
+        ? raceSeeds.reduce((sum, s) => sum + (s.classification?.points ?? 0), 0)
+        : null;
+
+  const first = w.seeds[0];
+  const last = w.seeds[w.seeds.length - 1];
+
+  return {
+    season: w.season,
+    round: w.round,
+    track_id: w.trackId,
+    track_name: w.trackName,
+    format: raceSeeds.length > 1 ? 'sprint' : 'standard',
+    started_at_wall: first ? BASE_WALL + first.startedOffset : null,
+    ended_at_wall: last ? BASE_WALL + last.startedOffset + last.durationS : null,
+    session_ids: w.seeds.map((s) => s.id),
+    sessions: w.seeds.map((s) => ({
+      id: s.id,
+      session_type: s.type,
+      session_type_name: s.typeName,
+      started_at_wall: BASE_WALL + s.startedOffset,
+      best_lap_ms: bestLapOf(s.id, s)
+    })),
+    quali: quali ? qualiResultOf(quali) : null,
+    sprint: sprint ? sprintResultOf(sprint) : null,
+    race: gp ? raceResultOf(gp) : null,
+    points,
+    consistency: gp ? consistencyOf(gp.id) : null,
+    tags: w.tag,
+    tag_conflict: w.tagConflict
+  };
+}
+
+/**
+ * Counting stats over a set of weekends. Wins, podiums and fastest laps read
+ * the grand prix only; sprint wins are their own count; poles come off quali.
+ * A null (unknown) never contributes — the total is the sum of what the
+ * weekends actually show.
+ */
+function totalsOf(weekends: readonly CareerWeekend[]): CareerTotals {
+  const totals: CareerTotals = {
+    points: 0,
+    wins: 0,
+    podiums: 0,
+    poles: 0,
+    fastest_laps: 0,
+    sprint_wins: 0,
+    races: 0
+  };
+  for (const w of weekends) {
+    if (w.points !== null) totals.points += w.points;
+    if (w.race) {
+      totals.races += 1;
+      if (w.race.position === 1) totals.wins += 1;
+      if (w.race.position !== null && w.race.position <= 3) totals.podiums += 1;
+      if (w.race.fastest_lap === true) totals.fastest_laps += 1;
+    }
+    if (w.quali?.position === 1) totals.poles += 1;
+    if (w.sprint?.position === 1) totals.sprint_wins += 1;
+  }
+  return totals;
+}
+
+/** A PB with the evidence of where it — and each of its sectors — was set. */
+interface PbDetail {
+  entry: CareerPb;
+  sectors: CareerPbSectors;
+}
+
+/**
+ * The circuit's personal best, read off every session there — time trials
+ * included. The theoretical best is the sum of the circuit's best valid
+ * sectors, each credited to the session and lap that set it.
+ */
+function pbFor(trackId: number): PbDetail | null {
+  const seeds = SESSION_SEEDS.filter((s) => s.trackId === trackId).sort(
+    (a, b) => a.startedOffset - b.startedOffset
+  );
+
+  let best: { time: number; seed: SessionSeed; row: Lap } | null = null;
+  const sectorBest: Array<{ ms: number; sessionId: number; lap: number } | null> = [
+    null,
+    null,
+    null
+  ];
+  let topSpeed: number | null = null;
+
+  for (const seed of seeds) {
+    for (const row of mockLaps(seed.id, PLAYER_CAR_INDEX)) {
+      // The same validity rule bestLapOf applies, so the PB, the visit bests
+      // and the session bests can never disagree with each other.
+      if (INVALID_LAPS.has(row.lap_number)) continue;
+      if (row.top_speed_kmh !== null && (topSpeed === null || row.top_speed_kmh > topSpeed)) {
+        topSpeed = row.top_speed_kmh;
+      }
+      if (row.lap_time_ms !== null && (best === null || row.lap_time_ms < best.time)) {
+        best = { time: row.lap_time_ms, seed, row };
+      }
+      const sectors = [row.s1_ms, row.s2_ms, row.s3_ms];
+      sectors.forEach((ms, i) => {
+        if (ms === null) return;
+        const held = sectorBest[i];
+        if (held === null || held === undefined || ms < held.ms) {
+          sectorBest[i] = { ms, sessionId: seed.id, lap: row.lap_number };
+        }
+      });
+    }
+  }
+  if (!best) return null;
+
+  const [s1, s2, s3] = sectorBest;
+  const theoretical =
+    s1 && s2 && s3 ? s1.ms + s2.ms + s3.ms : null;
+
+  return {
+    entry: {
+      track_id: trackId,
+      track_name: best.seed.trackName,
+      best_lap_ms: best.time,
+      session_id: best.seed.id,
+      session_label: `${best.seed.typeName} (session ${best.seed.id})`,
+      lap_number: best.row.lap_number,
+      compound_visual: best.row.compound_visual,
+      compound_name: compoundLabel(best.row.compound_visual ?? -1),
+      set_at_wall: best.row.wall_ts,
+      theoretical_ms: theoretical,
+      top_speed_kmh: topSpeed
+    },
+    sectors: {
+      s1_ms: s1?.ms ?? null,
+      s1_session_id: s1?.sessionId ?? null,
+      s1_lap_number: s1?.lap ?? null,
+      s2_ms: s2?.ms ?? null,
+      s2_session_id: s2?.sessionId ?? null,
+      s2_lap_number: s2?.lap ?? null,
+      s3_ms: s3?.ms ?? null,
+      s3_session_id: s3?.sessionId ?? null,
+      s3_lap_number: s3?.lap ?? null
+    }
+  };
+}
+
+export function mockCareerOverview(): CareerOverview {
+  const weekends = careerWeekendSeeds().map(weekendPayload);
+
+  const seasonNumbers = [...new Set(weekends.map((w) => w.season))].sort((a, b) => a - b);
+  const seasons: CareerSeason[] = seasonNumbers.map((n) => {
+    const inSeason = weekends.filter((w) => w.season === n);
+    return { season: n, rounds: inSeason.length, totals: totalsOf(inSeason), weekends: inSeason };
+  });
+
+  // PB board order is chronological first visit, not fastest-first.
+  const firstVisit: number[] = [];
+  for (const seed of [...SESSION_SEEDS].sort((a, b) => a.startedOffset - b.startedOffset)) {
+    if (seed.trackId >= 0 && !firstVisit.includes(seed.trackId)) firstVisit.push(seed.trackId);
+  }
+  const pbs = firstVisit
+    .map((t) => pbFor(t)?.entry)
+    .filter((p): p is CareerPb => p !== undefined);
+
+  return {
+    seasons,
+    career_totals: totalsOf(weekends),
+    pbs,
+    untracked_sessions: SESSION_SEEDS.filter(
+      (s) => s.trackId < 0 || s.type === TIME_TRIAL_TYPE
+    ).length,
+    notes: CAREER_NOTES
+  };
+}
+
+export function mockCareerTrack(trackId: number): CareerTrackResponse | MockFailure {
+  const seeds = SESSION_SEEDS.filter((s) => s.trackId === trackId).sort(
+    (a, b) => a.startedOffset - b.startedOffset
+  );
+  if (seeds.length === 0) {
+    return { status: 404, detail: 'no sessions recorded at this track' };
+  }
+
+  const visits: CareerVisit[] = careerWeekendSeeds()
+    .filter((w) => w.trackId === trackId)
+    .map((w) => {
+      const payload = weekendPayload(w);
+      let best: number | null = null;
+      let bestSession: number | null = null;
+      for (const seed of w.seeds) {
+        const b = bestLapOf(seed.id, seed);
+        if (b !== null && (best === null || b < best)) {
+          best = b;
+          bestSession = seed.id;
+        }
+      }
+      return {
+        season: payload.season,
+        round: payload.round,
+        started_at_wall: payload.started_at_wall,
+        session_ids: payload.session_ids,
+        best_lap_ms: best,
+        best_lap_session_id: bestSession,
+        quali: payload.quali,
+        sprint: payload.sprint,
+        race: payload.race,
+        consistency: payload.consistency
+      };
+    });
+
+  const sessions: CareerTrackSession[] = seeds.map((seed) => {
+    const consistency = consistencyOf(seed.id);
+    let topSpeed: number | null = null;
+    for (const row of mockLaps(seed.id, PLAYER_CAR_INDEX)) {
+      if (row.top_speed_kmh !== null && (topSpeed === null || row.top_speed_kmh > topSpeed)) {
+        topSpeed = row.top_speed_kmh;
+      }
+    }
+    return {
+      id: seed.id,
+      session_type: seed.type,
+      session_type_name: seed.typeName,
+      started_at_wall: BASE_WALL + seed.startedOffset,
+      best_lap_ms: bestLapOf(seed.id, seed),
+      laps_total: seed.laps,
+      laps_used: consistency?.laps_used ?? null,
+      median_ms: consistency?.median_ms ?? null,
+      iqr_ms: consistency?.iqr_ms ?? null,
+      cv_pct: consistency?.cv_pct ?? null,
+      top_speed_kmh: topSpeed
+    };
+  });
+
+  const pb = pbFor(trackId);
+  return {
+    track_id: trackId,
+    track_name: seeds[0]?.trackName ?? null,
+    pb: pb ? { ...pb.entry, sectors: pb.sectors } : null,
+    visits,
+    sessions
   };
 }
 
@@ -2011,6 +2694,11 @@ export function handleMockRequest(rawUrl: string): MockResponse | null {
     if (track === null) return { status: 422, body: { detail: 'track_id is required' } };
     return asResponse(mockStrategy(track, num(p.get('race_laps'))));
   }
+
+  if (path === '/api/career/overview') return { status: 200, body: mockCareerOverview() };
+
+  const careerTrack = /^\/api\/career\/tracks\/([0-9]{1,20})$/.exec(path);
+  if (careerTrack) return asResponse(mockCareerTrack(Number(careerTrack[1])));
 
   return { status: 404, body: { detail: 'not found' } };
 }

@@ -20,6 +20,8 @@ export type RouteName =
   | 'corners'
   | 'stints'
   | 'strategy'
+  | 'career'
+  | 'careertrack'
   | 'notfound';
 
 export interface Route {
@@ -40,6 +42,8 @@ const ANALYSIS_ROUTES: ReadonlySet<RouteName> = new Set([
   'corners',
   'stints',
   'strategy',
+  'career',
+  'careertrack',
   'notfound'
 ]);
 
@@ -75,6 +79,18 @@ export function parseHash(hash: string): Route {
     // `/sessions/3/anything` is not a route; refuse rather than guess.
     if (rest.length === 0 && ID_RE.test(second)) {
       return { name: 'session', path, params: { id: second }, query };
+    }
+    return { name: 'notfound', path, params: empty, query };
+  }
+
+  if (head === 'career') {
+    if (second === undefined) return { name: 'career', path, params: empty, query };
+    // The only thing under /career is /career/tracks/{track_id}. A bare
+    // `/career/tracks` names no circuit and `/career/tracks/{id}/anything` is
+    // not a route; both are refused rather than guessed, like /sessions.
+    const trackId = rest[0];
+    if (second === 'tracks' && rest.length === 1 && trackId !== undefined && ID_RE.test(trackId)) {
+      return { name: 'careertrack', path, params: { track_id: trackId }, query };
     }
     return { name: 'notfound', path, params: empty, query };
   }

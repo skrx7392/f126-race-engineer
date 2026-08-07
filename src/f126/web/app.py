@@ -235,6 +235,9 @@ def create_app(
     from f126.web.analysis_routes import analysis_router  # noqa: PLC0415 — Phase 2 analysis API
 
     app.include_router(analysis_router(db_conn_factory))
+    from f126.web.career_routes import career_router  # noqa: PLC0415 — Phase 3 career API
+
+    app.include_router(career_router(db_conn_factory))
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:

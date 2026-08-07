@@ -45,6 +45,38 @@ describe('parseHash', () => {
     expect(parseHash('#/stints').name).toBe('stints');
   });
 
+  it('routes the career overview', () => {
+    expect(parseHash('#/career').name).toBe('career');
+    expect(parseHash('#/career/').name).toBe('career');
+    expect(parseHash('#/career?x=1').name).toBe('career');
+  });
+
+  it('captures a career track id', () => {
+    const route = parseHash('#/career/tracks/30');
+    expect(route.name).toBe('careertrack');
+    expect(route.params['track_id']).toBe('30');
+    expect(route.path).toBe('/career/tracks/30');
+  });
+
+  it('refuses a career tracks path without an id, or with a malformed one', () => {
+    // `/career/tracks` names no circuit; refusing beats guessing.
+    expect(parseHash('#/career/tracks').name).toBe('notfound');
+    for (const bad of [
+      '#/career/tracks/',
+      '#/career/tracks/abc',
+      '#/career/tracks/-1',
+      '#/career/tracks/1.5'
+    ]) {
+      expect(parseHash(bad).name, bad).toBe('notfound');
+    }
+  });
+
+  it('refuses extra segments under career rather than guessing', () => {
+    expect(parseHash('#/career/tracks/30/laps').name).toBe('notfound');
+    expect(parseHash('#/career/nope').name).toBe('notfound');
+    expect(parseHash('#/career/30').name).toBe('notfound');
+  });
+
   it('parses the query string separately from the path', () => {
     const route = parseHash('#/compare?sa=3&la=12&sb=3&lb=15');
     expect(route.name).toBe('compare');
@@ -78,7 +110,17 @@ describe('parseHash', () => {
 describe('isAnalysisRoute', () => {
   it('covers every route except the pit wall', () => {
     expect(isAnalysisRoute('pitwall')).toBe(false);
-    for (const name of ['sessions', 'session', 'compare', 'corners', 'stints', 'notfound'] as const) {
+    for (const name of [
+      'sessions',
+      'session',
+      'compare',
+      'corners',
+      'stints',
+      'strategy',
+      'career',
+      'careertrack',
+      'notfound'
+    ] as const) {
       expect(isAnalysisRoute(name), name).toBe(true);
     }
   });

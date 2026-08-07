@@ -497,6 +497,213 @@ export interface Debrief {
   fact_sheet: unknown;
 }
 
+// ── Phase 3: career ──────────────────────────────────────────────────────────
+
+/**
+ * A weekend's format. `sprint` means more than one race-type session was run:
+ * the last is the grand prix and the earlier ones are sprints.
+ */
+export type WeekendFormat = 'sprint' | 'standard';
+
+/**
+ * A season's (or the career's) counting stats.
+ *
+ * These are sums over what the classification packets actually recorded — a
+ * weekend whose packet never landed contributes nothing, and its own row shows
+ * null rather than a guessed number.
+ */
+export interface CareerTotals {
+  points: number;
+  wins: number;
+  podiums: number;
+  poles: number;
+  fastest_laps: number;
+  sprint_wins: number;
+  /** Weekends that ran a grand prix. Not the same as `rounds`. */
+  races: number;
+}
+
+/** The weekend's GP qualifying (types 5–9; shootouts set the sprint grid, not poles). */
+export interface CareerQualiResult {
+  session_id: number;
+  /** Null when the classification packet never landed. */
+  position: number | null;
+  best_lap_ms: number | null;
+}
+
+/** The sprint race's result, when the weekend had one. */
+export interface CareerSprintResult {
+  session_id: number;
+  position: number | null;
+  grid_position: number | null;
+  points: number | null;
+  status: string | null;
+}
+
+/** The grand prix result. Null fields mean the classification packet is missing. */
+export interface CareerRaceResult {
+  session_id: number;
+  position: number | null;
+  grid_position: number | null;
+  points: number | null;
+  pit_stops: number | null;
+  best_lap_ms: number | null;
+  fastest_lap: boolean | null;
+  status: string | null;
+}
+
+/**
+ * The representative-lap statistics (valid, non-in/out, non-excluded, within
+ * 107% of the median): the same rule the fact sheet uses.
+ */
+export interface CareerConsistency {
+  session_id: number;
+  laps_used: number;
+  median_ms: number | null;
+  iqr_ms: number | null;
+  /** Sample stdev / mean × 100. */
+  cv_pct: number | null;
+}
+
+/** One session inside a weekend, as the overview lists them. */
+export interface CareerWeekendSession {
+  id: number;
+  session_type: number | null;
+  session_type_name: string | null;
+  started_at_wall: number | null;
+  best_lap_ms: number | null;
+}
+
+/** A pinned `(season, round)` from `f126 tag`. Never written over HTTP. */
+export interface CareerTag {
+  season: number;
+  round: number | null;
+  note: string | null;
+}
+
+export interface CareerWeekend {
+  /** Derived (or tag-pinned) season and 1-based round within it. */
+  season: number;
+  round: number;
+  track_id: number;
+  track_name: string | null;
+  format: WeekendFormat;
+  started_at_wall: number | null;
+  ended_at_wall: number | null;
+  session_ids: number[];
+  sessions: CareerWeekendSession[];
+  quali: CareerQualiResult | null;
+  sprint: CareerSprintResult | null;
+  race: CareerRaceResult | null;
+  /**
+   * Classification points over the weekend's race-type sessions, sprint
+   * included. Null when any of them is missing its classification — an unknown
+   * is never summed into a number.
+   */
+  points: number | null;
+  /** The GP's representative-lap figure; null when there was no GP to measure. */
+  consistency: CareerConsistency | null;
+  /** The pinned tag, when one exists for any of the weekend's sessions. */
+  tags: CareerTag | null;
+  /** Disagreeing tags inside the weekend; the newest one won. */
+  tag_conflict: boolean;
+}
+
+export interface CareerSeason {
+  season: number;
+  rounds: number;
+  totals: CareerTotals;
+  weekends: CareerWeekend[];
+}
+
+/** One circuit's personal best, as the overview's PB board lists them. */
+export interface CareerPb {
+  track_id: number;
+  track_name: string | null;
+  best_lap_ms: number | null;
+  session_id: number | null;
+  session_label: string | null;
+  lap_number: number | null;
+  compound_visual: number | null;
+  compound_name: string | null;
+  set_at_wall: number | null;
+  /** Sum of the circuit's best valid sectors. Null when any sector is missing. */
+  theoretical_ms: number | null;
+  top_speed_kmh: number | null;
+}
+
+/** `GET /api/career/overview`. */
+export interface CareerOverview {
+  /** Ascending; weekends chronological within each. */
+  seasons: CareerSeason[];
+  career_totals: CareerTotals;
+  /** Every circuit with laps (time trial included), in first-visit order. */
+  pbs: CareerPb[];
+  /** Sessions the derivation excluded (time trials, unknown circuits). */
+  untracked_sessions: number;
+  /** The derivation rules, stated in the payload so the page can show them. */
+  notes: Record<string, string>;
+}
+
+/** Where each of the three best sectors was set. */
+export interface CareerPbSectors {
+  s1_ms: number | null;
+  s1_session_id: number | null;
+  s1_lap_number: number | null;
+  s2_ms: number | null;
+  s2_session_id: number | null;
+  s2_lap_number: number | null;
+  s3_ms: number | null;
+  s3_session_id: number | null;
+  s3_lap_number: number | null;
+}
+
+/** The track page's PB detail: the overview entry plus its sectors. */
+export interface CareerTrackPb extends CareerPb {
+  sectors: CareerPbSectors | null;
+}
+
+/** One career weekend at this circuit, as the track page charts them. */
+export interface CareerVisit {
+  season: number;
+  round: number;
+  started_at_wall: number | null;
+  session_ids: number[];
+  best_lap_ms: number | null;
+  best_lap_session_id: number | null;
+  quali: CareerQualiResult | null;
+  sprint: CareerSprintResult | null;
+  race: CareerRaceResult | null;
+  consistency: CareerConsistency | null;
+}
+
+/** One session at this circuit, with its own consistency figures. */
+export interface CareerTrackSession {
+  id: number;
+  session_type: number | null;
+  session_type_name: string | null;
+  started_at_wall: number | null;
+  best_lap_ms: number | null;
+  laps_total: number | null;
+  laps_used: number | null;
+  median_ms: number | null;
+  iqr_ms: number | null;
+  cv_pct: number | null;
+  top_speed_kmh: number | null;
+}
+
+/** `GET /api/career/tracks/{track_id}` — 404 when the circuit has no sessions. */
+export interface CareerTrackResponse {
+  track_id: number;
+  track_name: string | null;
+  /** Null only when nothing here ever completed a lap. */
+  pb: CareerTrackPb | null;
+  /** Career weekends at this circuit. Chart series are derived from these. */
+  visits: CareerVisit[];
+  /** Every session here, time trials included, chronological. */
+  sessions: CareerTrackSession[];
+}
+
 // ── transport ────────────────────────────────────────────────────────────────
 
 /**
@@ -658,6 +865,20 @@ export const fetchStrategy = (
     `/api/analysis/strategy${q({ track_id: trackId, race_laps: raceLaps })}`,
     signal
   );
+
+/** The whole career, derived: seasons, weekends, totals and the PB board. */
+export const fetchCareerOverview = (signal?: AbortSignal): Promise<CareerOverview> =>
+  apiGet<CareerOverview>('/api/career/overview', signal);
+
+/**
+ * One circuit's progress: every visit, every session, and the PB detail.
+ * A circuit with no sessions is a 404, which reaches the page as `notfound`.
+ */
+export const fetchCareerTrack = (
+  trackId: number,
+  signal?: AbortSignal
+): Promise<CareerTrackResponse> =>
+  apiGet<CareerTrackResponse>(`/api/career/tracks/${trackId}`, signal);
 
 /**
  * The stored debrief, or `null` when the session has none.

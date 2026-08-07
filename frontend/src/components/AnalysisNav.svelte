@@ -25,6 +25,10 @@
 
   let sessionId = $derived(analysis.a?.sessionId ?? null);
 
+  /* A track's career page is a career page: the Career link stays lit there
+     rather than leaving the bar with no current section. */
+  let active = $derived(current === 'careertrack' ? ('career' as RouteName) : current);
+
   let links = $derived([
     { name: 'sessions' as RouteName, label: 'Sessions', to: href('/sessions') },
     { name: 'compare' as RouteName, label: 'Compare', to: analysis.compareHref() },
@@ -36,7 +40,9 @@
     },
     // Strategy is track-scoped, so it carries no lap selection — it is reached with no
     // parameters and picks a circuit for itself.
-    { name: 'strategy' as RouteName, label: 'Strategy', to: href('/strategy') }
+    { name: 'strategy' as RouteName, label: 'Strategy', to: href('/strategy') },
+    // Career is scoped to nothing at all: one archive, one career.
+    { name: 'career' as RouteName, label: 'Career', to: href('/career') }
   ]);
 </script>
 
@@ -51,8 +57,8 @@
         <a
           href={link.to}
           class="link"
-          class:active={current === link.name}
-          aria-current={current === link.name ? 'page' : undefined}
+          class:active={active === link.name}
+          aria-current={active === link.name ? 'page' : undefined}
         >
           {link.label}
         </a>

@@ -23,6 +23,8 @@
   import CornersPage from './routes/CornersPage.svelte';
   import StintsPage from './routes/StintsPage.svelte';
   import StrategyPage from './routes/StrategyPage.svelte';
+  import CareerPage from './routes/CareerPage.svelte';
+  import TrackProgressPage from './routes/TrackProgressPage.svelte';
 
   $effect(() => router.start());
 
@@ -78,6 +80,10 @@
         <StintsPage sessionId={stintSession} />
       {:else if route.name === 'strategy'}
         <StrategyPage trackId={strategyTrack} raceLaps={strategyLaps} />
+      {:else if route.name === 'career'}
+        <CareerPage />
+      {:else if route.name === 'careertrack'}
+        <TrackProgressPage trackId={Number(route.params['track_id'])} />
       {:else}
         <section class="analysis-page" data-page="notfound">
           <h1 class="page-title">No such page</h1>

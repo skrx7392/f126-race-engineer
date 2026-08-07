@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { displayStintRanges } from '../lib/analysis-format';
+import {
+  displayStintRanges,
+  formatCvPercent,
+  formatPosition,
+  formatSeconds,
+  visitLabel
+} from '../lib/analysis-format';
+import { DASH } from '../lib/format';
 
 /**
  * The stint strip is read as "how long was I on each tyre", so its ranges have
@@ -98,5 +105,57 @@ describe('displayStintRanges', () => {
 
   it('returns nothing for no stints', () => {
     expect(displayStintRanges([])).toEqual([]);
+  });
+});
+
+/**
+ * The career helpers follow the two house rules: unknown is an em dash, never a
+ * partial number, and the digit count never changes between rows.
+ */
+
+describe('formatSeconds', () => {
+  it('renders milliseconds as unsigned seconds with fixed decimals', () => {
+    expect(formatSeconds(410)).toBe('0.41');
+    expect(formatSeconds(1234)).toBe('1.23');
+    expect(formatSeconds(0)).toBe('0.00');
+  });
+
+  it('renders unknown as an em dash', () => {
+    expect(formatSeconds(null)).toBe(DASH);
+    expect(formatSeconds(undefined)).toBe(DASH);
+    expect(formatSeconds(Number.NaN)).toBe(DASH);
+  });
+});
+
+describe('formatCvPercent', () => {
+  it('keeps the two decimals a race CV actually varies in', () => {
+    expect(formatCvPercent(0.38)).toBe('0.38%');
+    expect(formatCvPercent(1.5)).toBe('1.50%');
+  });
+
+  it('renders unknown as an em dash, with no stray percent sign', () => {
+    expect(formatCvPercent(null)).toBe(DASH);
+    expect(formatCvPercent(undefined)).toBe(DASH);
+  });
+});
+
+describe('formatPosition', () => {
+  it('prefixes a classified position', () => {
+    expect(formatPosition(1)).toBe('P1');
+    expect(formatPosition(22)).toBe('P22');
+  });
+
+  it('never renders P0 or a placeholder position', () => {
+    expect(formatPosition(0)).toBe(DASH);
+    expect(formatPosition(-1)).toBe(DASH);
+    expect(formatPosition(null)).toBe(DASH);
+    expect(formatPosition(undefined)).toBe(DASH);
+  });
+});
+
+describe('visitLabel', () => {
+  it('labels a visit by season and round', () => {
+    expect(visitLabel(1, 2)).toBe('S1 R2');
+    expect(visitLabel(2, 12)).toBe('S2 R12');
   });
 });

@@ -203,6 +203,46 @@ export function formatSecondsDelta(ms: number | null | undefined): string {
   return `${sign}${Math.abs(seconds).toFixed(1)}`;
 }
 
+// ── career ───────────────────────────────────────────────────────────────────
+
+/**
+ * An unsigned spread in seconds: `410` -> `"0.41"`.
+ *
+ * For IQRs and other magnitudes that are not deltas — a spread has no sign, so
+ * borrowing `formatSecondsDelta` would print a `+` that reads as "worse than
+ * something", which a spread is not.
+ */
+export function formatSeconds(ms: number | null | undefined, digits = 2): string {
+  if (ms == null || !Number.isFinite(ms)) return DASH;
+  return (ms / 1000).toFixed(digits);
+}
+
+/**
+ * A coefficient of variation: `0.38` -> `"0.38%"`.
+ *
+ * Two decimals where `formatPercent` keeps one: a race CV lives well under one
+ * percent, and rounding 0.38 to 0.4 throws away the digit being compared.
+ */
+export function formatCvPercent(pct: number | null | undefined): string {
+  if (pct == null || !Number.isFinite(pct)) return DASH;
+  return `${pct.toFixed(2)}%`;
+}
+
+/** A classified position: `4` -> `"P4"`, unknown -> em dash, never "P0". */
+export function formatPosition(position: number | null | undefined): string {
+  if (position == null || !Number.isFinite(position) || position < 1) return DASH;
+  return `P${Math.round(position)}`;
+}
+
+/**
+ * `1` + `2` -> `"S1 R2"` — season and round, the way the track page's evolution
+ * chart labels its visits. Deliberately parallel to `lapLabel`'s "S3 L12", with
+ * R for round marking the different meaning of the S.
+ */
+export function visitLabel(season: number, round: number): string {
+  return `S${season} R${round}`;
+}
+
 /** Corner kind as the table renders it. */
 export const CORNER_KIND_LABEL: Record<string, string> = {
   slow: 'Slow',

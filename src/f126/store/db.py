@@ -19,10 +19,10 @@ from psycopg.rows import dict_row
 
 log = logging.getLogger(__name__)
 
-#: v2 added the append-only `debriefs` table. The upgrade needs no ALTER — schema.sql is
-#: CREATE ... IF NOT EXISTS throughout, so applying it to a v1 database just creates the
-#: new table and leaves every existing one alone.
-SCHEMA_VERSION = 2
+#: v2 added the append-only `debriefs` table; v3 the `career_tags` pins. Neither upgrade
+#: needs an ALTER — schema.sql is CREATE ... IF NOT EXISTS throughout, so applying it to an
+#: older database just creates the new table and leaves every existing one alone.
+SCHEMA_VERSION = 3
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 Conn = psycopg.Connection[dict[str, Any]]

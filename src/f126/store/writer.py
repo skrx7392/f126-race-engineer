@@ -174,6 +174,17 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "fact_sheet",
         "text",
     ),
+    # Written out-of-band by `upsert_career_tag` / `delete_career_tag` (the `f126 tag` CLI),
+    # never through the queue and never by HTTP. Listed here for the same reason `debriefs`
+    # is: the column order lives in one place and stays checked against schema.sql by
+    # tests/test_store.py.
+    "career_tags": (
+        "session_uid",
+        "season",
+        "round",
+        "note",
+        "updated_at",
+    ),
 }
 
 # Upsert targets. Everything else is a plain append-only INSERT.
@@ -196,6 +207,7 @@ TABLE_ORDER: tuple[str, ...] = (
     "wear_samples",
     "events",
     "debriefs",
+    "career_tags",
 )
 
 # Kept in the retry buffer while the DB is down; everything else is dropped and counted.
@@ -334,6 +346,59 @@ def insert_debrief(
     if not getattr(conn, "autocommit", True):
         conn.commit()
     return row_id
+
+
+_UPSERT_CAREER_TAG_SQL = """
+    INSERT INTO career_tags (session_uid, season, round, note, updated_at)
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT (session_uid) DO UPDATE
+       SET season = EXCLUDED.season, round = EXCLUDED.round,
+           note = EXCLUDED.note, updated_at = EXCLUDED.updated_at
+"""
+# Whole-row replacement, deliberately NOT the writer's COALESCE upsert: a tag is a
+# hand-written statement and the newest command states all of it. Re-tagging with no
+# --round must null the old pin so the round goes back to being derived — COALESCE
+# would silently keep the stale one.
+
+
+def upsert_career_tag(
+    conn: Any,
+    session_uid: str,
+    *,
+    season: int | None,
+    round_no: int | None,
+    note: str | None,
+    updated_at: float,
+) -> None:
+    """Write (or overwrite) one session's career pin. Commits on the caller's connection.
+
+    Out-of-band like :func:`insert_debrief`, and for the same reason: this is a CLI write
+    made minutes or months after the capture path went quiet, and it is allowed to block.
+    The HTTP surface never reaches here — career tags have no mutating route, ever.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            _UPSERT_CAREER_TAG_SQL,
+            (
+                str(session_uid),
+                None if season is None else int(season),
+                None if round_no is None else int(round_no),
+                note,
+                float(updated_at),
+            ),
+        )
+    if not getattr(conn, "autocommit", True):
+        conn.commit()
+
+
+def delete_career_tag(conn: Any, session_uid: str) -> bool:
+    """Remove one session's career pin. True if a row was actually deleted."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM career_tags WHERE session_uid = %s", (str(session_uid),))
+        deleted = (cur.rowcount or 0) > 0
+    if not getattr(conn, "autocommit", True):
+        conn.commit()
+    return deleted
 
 
 # --- Stats ------------------------------------------------------------------------------------

@@ -247,15 +247,27 @@ def _session_section(session: Mapping[str, Any], lap_rows: Sequence[JsonRow]) ->
     return {key: value for key, value in out.items() if value is not None}
 
 
-def _classification_row(
-    session: Mapping[str, Any], player: int
-) -> tuple[Mapping[str, Any], int] | None:
-    """The player's row in the game's final classification, plus the field size."""
+def _classification_rows(session: Mapping[str, Any]) -> list[Any] | None:
+    """The game's final-classification rows, or None when the packet never landed.
+
+    Shared with `f126.analysis.career`, which needs every car's row (the fastest-lap flag
+    is a strict minimum across the field), not just the player's.
+    """
     classification = session.get("final_classification_json")
     if not isinstance(classification, Mapping):
         return None
     rows = classification.get("rows")
     if not isinstance(rows, list) or not rows:
+        return None
+    return rows
+
+
+def _classification_row(
+    session: Mapping[str, Any], player: int
+) -> tuple[Mapping[str, Any], int] | None:
+    """The player's row in the game's final classification, plus the field size."""
+    rows = _classification_rows(session)
+    if rows is None:
         return None
     mine = next(
         (row for row in rows if isinstance(row, Mapping) and _int(row.get("car_index")) == player),
@@ -348,6 +360,24 @@ def _excluded_laps(stints_payload: Mapping[str, Any], car_index: int) -> dict[in
     return excluded
 
 
+def representative_lap_times(
+    laps: Sequence[JsonRow], excluded: Mapping[int, str]
+) -> list[float]:
+    """Lap times of the representative laps: timed, valid, not ruled out by the stint engine.
+
+    This is *the* consistency population — the set the median/IQR here and the `cv_pct` on
+    the career pages both describe. One implementation, so "consistency" cannot quietly
+    mean two different lap sets in two places. `excluded` is `_excluded_laps`' mapping:
+    in/out laps, pit-status laps, and anything past 107 % of the stint median.
+    """
+    timed = [row for row in laps if (_int(row.get("lap_time_ms")) or 0) > 0]
+    return [
+        float(row["lap_time_ms"])
+        for row in timed
+        if row.get("valid") and _int(row.get("lap_number")) not in excluded
+    ]
+
+
 def _pace_section(
     laps: Sequence[JsonRow], excluded: Mapping[int, str]
 ) -> tuple[dict[str, Any], JsonRow | None]:
@@ -377,10 +407,7 @@ def _pace_section(
     # Representative laps: valid, timed, and not one the stint engine already ruled out as
     # an in/out lap or an outlier. This is the set the consistency numbers describe, and it
     # is named in the sheet so the debrief can say what it measured.
-    representative = [
-        row for row in valid if _int(row.get("lap_number")) not in excluded
-    ]
-    times = [float(row["lap_time_ms"]) for row in representative]
+    times = representative_lap_times(laps, excluded)
     out["consistency_laps_used"] = len(times)
     dropped = sorted(
         {_int(row.get("lap_number")) for row in valid} & set(excluded),

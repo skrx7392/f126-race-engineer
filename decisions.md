@@ -326,3 +326,34 @@ Reversals welcome — flag anything and I'll adjust.
     such a circuit flat in time, so ranking falls back to base pace alone and the cheapest
     way to satisfy the two-compound rule becomes a one-lap token stint. It is honest — that
     *is* what the data says — but a minimum-stint-length rule is the obvious follow-up.
+
+## 2026-08-07 — Phase 3: career (season progress, per-track evolution, PBs)
+
+41. **Career tags live in their own `career_tags` table keyed by `session_uid`, not in
+    columns on `sessions`.** The Notion task said "season/round columns on sessions", but
+    the sessions table is a derived index that `backfill` drops and re-creates — a
+    hand-written tag stored there would be silently destroyed by the next re-derivation.
+    `session_uid` comes from the game and survives every re-parse, so a uid-keyed side
+    table is the only shape that honours the raw-log doctrine. The intent of the task
+    (season/round attached to every session) is met at read time by a join.
+
+42. **Season and round are derived, and tags only pin.** Weekend = maximal chronological
+    run of sessions at one circuit, split on a >48 h gap; round = index within season;
+    season increments when a circuit repeats within the season (a 24-round career never
+    visits a circuit twice in one year). The pages therefore work with zero manual input —
+    `f126 tag` exists for the day the heuristic is wrong (an off-season test at a repeated
+    track, say), pins that weekend, and later weekends derive forward from the pin.
+    Time trials are excluded from weekends (not career rounds) but still count for PBs.
+
+43. **The last race-type session in a weekend is the grand prix; earlier ones are
+    sprints.** The 2026 wire format labels a sprint as just "Race"/"Race 2", so the only
+    reliable discriminator this recorder has is order — sprints run before the GP.
+    Wins/podiums/fastest-laps count the GP alone, `sprint_wins` is its own total, poles
+    come from GP qualifying only (types 5–9; a shootout P1 sets a sprint grid, not a pole),
+    and `points` sums the game's own classification points over every race-type session,
+    sprint included — the game is the authority on its own scoring rules.
+
+44. **Tag writes go through the CLI, never HTTP.** `f126 tag` upserts the table directly
+    over the same DSN the service uses. The internet-open surface keeps its invariant —
+    read-only, enforced by the route-walk test — and gains two GETs
+    (`/api/career/overview`, `/api/career/tracks/{track_id}`).

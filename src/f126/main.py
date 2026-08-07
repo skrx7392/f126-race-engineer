@@ -34,6 +34,21 @@ def main(argv: list[str] | None = None) -> int:
         help="write a new debrief even if one exists (the old one is kept)",
     )
 
+    p_tag = sub.add_parser("tag", help="pin a session's career season/round (career_tags)")
+    p_tag.add_argument(
+        "session_id", nargs="?", type=int, help="sessions.id, as shown by /api/sessions"
+    )
+    p_tag.add_argument("--season", type=int, help="season to pin the session's weekend to")
+    p_tag.add_argument(
+        "--round",
+        type=int,
+        dest="round_no",
+        help="round within the season (omit to keep the round derived)",
+    )
+    p_tag.add_argument("--note", help="free-text note stored with the tag")
+    p_tag.add_argument("--clear", action="store_true", help="delete the session's tag")
+    p_tag.add_argument("--list", action="store_true", dest="list_tags", help="print every tag")
+
     args = parser.parse_args(argv)
     cfg = config.load()
 
@@ -53,6 +68,18 @@ def main(argv: list[str] | None = None) -> int:
         from f126.app import run_debrief
 
         return run_debrief(cfg, args.session_id, regenerate=args.regenerate)
+    if args.command == "tag":
+        from f126.app import run_tag
+
+        return run_tag(
+            cfg,
+            args.session_id,
+            season=args.season,
+            round_no=args.round_no,
+            note=args.note,
+            clear=args.clear,
+            list_tags=args.list_tags,
+        )
     return 2
 
 

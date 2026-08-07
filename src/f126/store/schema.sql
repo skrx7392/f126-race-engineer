@@ -1,4 +1,4 @@
--- f126 Postgres schema, version 2.
+-- f126 Postgres schema, version 3.
 --
 -- Postgres is a DERIVED INDEX: the .f1raw capture logs are the source of truth and
 -- every table here can be rebuilt with `f126 backfill`. That is why sample tables are
@@ -193,3 +193,19 @@ CREATE TABLE IF NOT EXISTS debriefs (
 
 CREATE INDEX IF NOT EXISTS debriefs_session_idx
     ON debriefs (session_id, created_at DESC NULLS LAST, id DESC);
+
+-- Career season/round pins (schema v3), written only by `f126 tag` — never by HTTP.
+--
+-- Keyed by session_uid, NOT sessions.id: every other table hangs off the derived index,
+-- but a tag is the one hand-written fact in this database and it must survive `f126
+-- backfill` dropping and re-deriving the session rows. session_uid comes from the game
+-- itself, so it is stable across re-parses of the same capture; a sessions.id is not.
+-- One tag per game session — the tag pins the whole weekend the session belongs to, and
+-- re-tagging is an upsert, not an append.
+CREATE TABLE IF NOT EXISTS career_tags (
+    session_uid TEXT PRIMARY KEY,
+    season INT,
+    round INT,
+    note TEXT,
+    updated_at DOUBLE PRECISION
+);

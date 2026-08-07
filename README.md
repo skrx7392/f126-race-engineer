@@ -386,6 +386,31 @@ invariant that lets this dashboard sit on the open internet.
 
 ---
 
+## Season progress
+
+**`#/career`** is the career at a glance: points, wins, podiums, poles and sprint wins per
+season, every weekend in order with its qualifying, sprint and race results, and a personal-best
+board per circuit. **`#/career/tracks/{id}`** is one circuit's story — best lap and median pace
+across every visit, the three best sectors and where each was set, and how repeatable the laps
+were each time you came back.
+
+Seasons and rounds are **derived, not entered**: consecutive sessions at one circuit form a
+weekend, weekends number themselves in order, and the season ticks over when a circuit comes
+round again — a career never visits the same track twice in a year. When the heuristic gets one
+wrong (it will, eventually), pin it:
+
+```bash
+f126 tag 581 --season 1 --round 8    # pin the weekend containing session 581
+f126 tag --list                      # every pin
+f126 tag 581 --clear                 # forget it
+```
+
+Tags are keyed by the game's own session UID, so a `backfill` that rebuilds every derived table
+leaves them standing. And as everywhere else: the numbers on these pages are measured or they
+are absent — a weekend the game never classified shows a dash, not a guess.
+
+---
+
 ## Raw captures and backfill
 
 Every packet is written to `/data/raw/<session>.f1raw` (zstd-compressed) *before* parsing. The
