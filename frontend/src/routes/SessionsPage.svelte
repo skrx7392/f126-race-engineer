@@ -68,6 +68,7 @@
                 <th scope="col">Type</th>
                 <th scope="col" class="num" title="Laps you drove in this session">Laps</th>
                 <th scope="col" class="num">Best lap</th>
+                <th scope="col"><span class="sr-only">Strategy</span></th>
               </tr>
             </thead>
             <tbody>
@@ -99,6 +100,25 @@
                     uses for an unknown value.
                   -->
                   <td class="num clock">{formatLapTime(session.best_lap_ms)}</td>
+                  <!--
+                    The strategy sheet is a property of the *circuit*, not of this row, so
+                    the link goes to the track. It sits above the row's stretched link
+                    rather than inside it — nesting one link in another is invalid, and the
+                    overlay would swallow the click anyway.
+                  -->
+                  <td class="above">
+                    {#if session.track_id != null && session.track_id >= 0}
+                      <a
+                        class="strategy-link"
+                        href={href('/strategy', { track: session.track_id })}
+                        title="Fuel and pit strategy for {session.track_name ?? 'this circuit'}"
+                      >
+                        Strategy
+                      </a>
+                    {:else}
+                      <span class="label">{DASH}</span>
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -142,5 +162,34 @@
 
   .type {
     color: var(--ink-2);
+  }
+
+  /* Above the row's stretched link, so this cell's own link is the one that gets clicked. */
+  .above {
+    position: relative;
+    z-index: 1;
+    width: 1%;
+  }
+
+  .strategy-link {
+    color: var(--ink-3);
+    font-size: 0.76rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .strategy-link:hover {
+    color: var(--ink);
+    text-decoration: underline;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 </style>

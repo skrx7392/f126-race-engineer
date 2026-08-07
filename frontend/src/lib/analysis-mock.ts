@@ -42,6 +42,11 @@ import type {
   Stint,
   StintLap,
   StintsResponse,
+  StrategyCompound,
+  StrategyPlan,
+  StrategyPlanStint,
+  StrategyResponse,
+  StrategySessionUsed,
   TyreStintRow
 } from './analysis-api';
 
@@ -1207,6 +1212,385 @@ export function mockStints(sessionId: number): StintsResponse | MockFailure {
   return { session_id: sessionId, stints };
 }
 
+// ── strategy ─────────────────────────────────────────────────────────────────
+
+/**
+ * The strategy sheet, modelled rather than transcribed.
+ *
+ * Same rule as everything else here: this is not a fixture blob, it is the same
+ * decision the backend makes — measure each compound, cap a stint at the wear
+ * cliff, enumerate the legal orderings, hand laps out to whichever stint's next
+ * lap is cheapest, and rank on the total. So the page is exercised against a
+ * plan whose stint lengths and pit windows are internally consistent, and the
+ * "untested compound" and "no legal plan" paths are reachable by changing the
+ * inputs rather than by hand-writing a second payload.
+ */
+
+/** Must match `analysis/strategy.py::WEAR_CLIFF_PCT`. */
+const WEAR_CLIFF_PCT = 28.0;
+const FUEL_MARGIN_LAPS = 0.45;
+const MAX_PLANS = 12;
+const SC_FLEXIBLE_WINDOW_LAPS = 3;
+const FUEL_KG_PER_LAP = 1.82;
+const PIT_LOSS_S = 20.6;
+
+interface CompoundEvidence {
+  compound: number;
+  name: string;
+  /** Fitted lap time at age zero. */
+  baseMs: number;
+  degMsPerLap: number;
+  r2: number;
+  lapsUsed: number;
+  wearPctPerLap: number;
+  wearLaps: number;
+  wearSource: 'wear_samples' | 'stint_end_wear';
+  evidence: 'race' | 'practice';
+  sessionId: number;
+  sessionLabel: string;
+  stintNo: number;
+  lapRange: [number, number];
+}
+
+/**
+ * What the weekend measured, per circuit.
+ *
+ * Bahrain has the full picture: two compounds out of the race and a third out of
+ * qualifying, which is the interesting case — the soft's model is real but it is
+ * *practice* evidence, and the page has to say so. Monza has one session and no
+ * race at all, so it exercises the "tell me how long the race is" 422.
+ */
+const STRATEGY_EVIDENCE: Record<number, CompoundEvidence[]> = {
+  [BAHRAIN_TRACK_ID]: [
+    {
+      compound: 17,
+      name: 'Medium',
+      baseMs: 93_050,
+      degMsPerLap: 168,
+      r2: 0.88,
+      lapsUsed: 8,
+      wearPctPerLap: 3.35,
+      wearLaps: 10,
+      wearSource: 'wear_samples',
+      evidence: 'race',
+      sessionId: HEADLINE_SESSION_ID,
+      sessionLabel: `Race (session ${HEADLINE_SESSION_ID})`,
+      stintNo: 1,
+      lapRange: [1, PIT_IN_LAP]
+    },
+    {
+      compound: 18,
+      name: 'Hard',
+      baseMs: 93_480,
+      degMsPerLap: 121,
+      r2: 0.81,
+      lapsUsed: 7,
+      wearPctPerLap: 2.9,
+      wearLaps: 8,
+      wearSource: 'wear_samples',
+      evidence: 'race',
+      sessionId: HEADLINE_SESSION_ID,
+      sessionLabel: `Race (session ${HEADLINE_SESSION_ID})`,
+      stintNo: 2,
+      lapRange: [PIT_OUT_LAP, LAP_COUNT]
+    },
+    {
+      // Quali running: quick, and going off twice as fast as anything in the race.
+      compound: 16,
+      name: 'Soft',
+      baseMs: 91_720,
+      degMsPerLap: 402,
+      r2: 0.74,
+      lapsUsed: 5,
+      wearPctPerLap: 6.2,
+      wearLaps: 5,
+      wearSource: 'stint_end_wear',
+      evidence: 'practice',
+      sessionId: 2,
+      sessionLabel: 'Qualifying 3 (session 2)',
+      stintNo: 1,
+      lapRange: [1, 6]
+    }
+  ],
+  11: []
+};
+
+function strategyCompound(
+  compound: number,
+  evidence: CompoundEvidence | undefined,
+  raceLaps: number
+): StrategyCompound {
+  const name = compoundLabel(compound);
+  if (!evidence) {
+    return {
+      compound_visual: compound,
+      name,
+      dry: true,
+      untested: true,
+      stints_seen: 0,
+      evidence: null,
+      pace: null,
+      wear: null,
+      max_stint_laps: null,
+      plannable: false,
+      not_plannable_reason: 'no stint on this compound was recorded this weekend'
+    };
+  }
+  const maxLaps = Math.max(
+    1,
+    Math.min(raceLaps, Math.floor(WEAR_CLIFF_PCT / evidence.wearPctPerLap))
+  );
+  return {
+    compound_visual: compound,
+    name: evidence.name,
+    dry: true,
+    untested: false,
+    stints_seen: 1,
+    evidence: evidence.evidence,
+    pace: {
+      base_ms: evidence.baseMs,
+      deg_ms_per_lap: evidence.degMsPerLap,
+      r2: evidence.r2,
+      laps_used: evidence.lapsUsed,
+      evidence: evidence.evidence,
+      session_id: evidence.sessionId,
+      session_label: evidence.sessionLabel,
+      stint_no: evidence.stintNo,
+      lap_range: [evidence.lapRange[0], evidence.lapRange[1]]
+    },
+    wear: {
+      pct_per_lap: evidence.wearPctPerLap,
+      source: evidence.wearSource,
+      laps: evidence.wearLaps,
+      evidence: evidence.evidence,
+      session_id: evidence.sessionId,
+      session_label: evidence.sessionLabel,
+      stint_no: evidence.stintNo
+    },
+    max_stint_laps: maxLaps,
+    projected_wear_at_max_pct: Math.round(evidence.wearPctPerLap * maxLaps * 10) / 10,
+    plannable: true,
+    not_plannable_reason: null
+  };
+}
+
+/** Names for the always-listed dry compounds, matching `enums.ts`. */
+function compoundLabel(visual: number): string {
+  return visual === 16 ? 'Soft' : visual === 17 ? 'Medium' : visual === 18 ? 'Hard' : 'Unknown';
+}
+
+/** Greedy convex allocation, exactly as `strategy.py::_allocate` does it. */
+function allocate(
+  chain: StrategyCompound[],
+  raceLaps: number
+): number[] | null {
+  const caps = chain.map((c) => c.max_stint_laps ?? 0);
+  const total = caps.reduce((a, b) => a + b, 0);
+  if (raceLaps < chain.length || total < raceLaps) return null;
+  const laps = chain.map(() => 1);
+  for (let handed = chain.length; handed < raceLaps; handed++) {
+    let best = -1;
+    let bestCost = Infinity;
+    chain.forEach((c, i) => {
+      if (laps[i]! >= caps[i]!) return;
+      const cost = (c.pace?.base_ms ?? 0) + Math.max(0, c.pace?.deg_ms_per_lap ?? 0) * laps[i]!;
+      if (cost < bestCost) {
+        best = i;
+        bestCost = cost;
+      }
+    });
+    if (best < 0) return null;
+    laps[best]!++;
+  }
+  return laps;
+}
+
+function planFor(
+  chain: StrategyCompound[],
+  raceLaps: number
+): StrategyPlan | null {
+  const laps = allocate(chain, raceLaps);
+  if (!laps) return null;
+
+  const stints: StrategyPlanStint[] = [];
+  let totalMs = PIT_LOSS_S * 1000 * (chain.length - 1);
+  let cursor = 1;
+  chain.forEach((c, i) => {
+    const n = laps[i]!;
+    const base = c.pace?.base_ms ?? 0;
+    const deg = Math.max(0, c.pace?.deg_ms_per_lap ?? 0);
+    totalMs += n * base + (deg * n * (n - 1)) / 2;
+    stints.push({
+      compound_visual: c.compound_visual,
+      name: c.name,
+      lap_start: cursor,
+      lap_end: cursor + n - 1,
+      laps: n,
+      projected_end_wear_pct: Math.round((c.wear?.pct_per_lap ?? 0) * n * 10) / 10
+    });
+    cursor += n;
+  });
+
+  const caps = chain.map((c) => c.max_stint_laps ?? 0);
+  const windows = [];
+  for (let stop = 1; stop < chain.length; stop++) {
+    const after = caps.slice(stop).reduce((a, b) => a + b, 0);
+    const before = caps.slice(0, stop).reduce((a, b) => a + b, 0);
+    const earliest = Math.max(stop, raceLaps - after);
+    const latest = Math.min(before, raceLaps - (chain.length - stop));
+    windows.push({
+      stop,
+      planned_lap: laps.slice(0, stop).reduce((a, b) => a + b, 0),
+      earliest_lap: earliest,
+      latest_lap: latest,
+      window_laps: Math.max(0, latest - earliest)
+    });
+  }
+
+  const widest = windows.reduce(
+    (a, b) => (b.window_laps > a.window_laps ? b : a),
+    windows[0] ?? { stop: 0, planned_lap: 0, earliest_lap: 0, latest_lap: 0, window_laps: 0 }
+  );
+  const lastStop = windows[windows.length - 1]?.planned_lap ?? 0;
+  const flexible = widest.window_laps >= SC_FLEXIBLE_WINDOW_LAPS;
+
+  return {
+    rank: 0,
+    stops: chain.length - 1,
+    compounds: chain.map((c) => c.compound_visual),
+    label: chain.map((c) => c.name).join(' → '),
+    stints,
+    total_time_ms: Math.round(totalMs * 10) / 10,
+    delta_to_best_ms: 0,
+    pit_windows: windows,
+    safety_car: flexible
+      ? {
+          flexibility: 'flexible',
+          note:
+            `stop ${widest.stop} can be taken anywhere from lap ${widest.earliest_lap} to lap ` +
+            `${widest.latest_lap}, so a safety car inside that window is close to a free stop. ` +
+            `Last stop is planned for lap ${lastStop}, leaving ${raceLaps - lastStop} laps to run.`
+        }
+      : {
+          flexibility: 'tight',
+          note:
+            `every stop has a window of ${widest.window_laps} lap(s) or less — the wear ` +
+            'ceiling fixes when you box, so a safety car outside those laps cannot be used ' +
+            `without going past the cliff. Last stop is planned for lap ${lastStop}.`
+        }
+  };
+}
+
+export function mockStrategy(
+  trackId: number,
+  raceLaps: number | null
+): StrategyResponse | MockFailure {
+  const sessions = SESSION_SEEDS.filter((s) => s.trackId === trackId);
+  if (sessions.length === 0) return { status: 404, detail: 'no sessions recorded at this track' };
+
+  const race = sessions.find((s) => s.type >= 15 && s.type <= 17 && s.totalLaps);
+  if (raceLaps === null && !race) {
+    return {
+      status: 422,
+      detail: 'no race at this track recorded its distance; pass race_laps=<int>'
+    };
+  }
+  const laps = raceLaps ?? race?.totalLaps ?? LAP_COUNT;
+  const source = raceLaps === null ? `${race?.typeName} (session ${race?.id})` : 'request';
+
+  const evidence = STRATEGY_EVIDENCE[trackId] ?? [];
+  const byCompound = new Map(evidence.map((e) => [e.compound, e]));
+  const compounds = [16, 17, 18].map((c) => strategyCompound(c, byCompound.get(c), laps));
+
+  const plannable = compounds.filter((c) => c.plannable);
+  const plans: StrategyPlan[] = [];
+  for (const stops of [1, 2]) {
+    const combos: StrategyCompound[][] = [[]];
+    for (let i = 0; i <= stops; i++) {
+      const next: StrategyCompound[][] = [];
+      for (const combo of combos) for (const c of plannable) next.push([...combo, c]);
+      combos.length = 0;
+      combos.push(...next);
+    }
+    for (const combo of combos) {
+      if (new Set(combo.map((c) => c.compound_visual)).size < 2) continue;
+      const plan = planFor(combo, laps);
+      if (plan) plans.push(plan);
+    }
+  }
+  plans.sort(
+    (a, b) =>
+      a.total_time_ms - b.total_time_ms ||
+      a.stops - b.stops ||
+      a.compounds.join().localeCompare(b.compounds.join())
+  );
+  const best = plans[0]?.total_time_ms ?? 0;
+  plans.forEach((plan, i) => {
+    plan.rank = i + 1;
+    plan.delta_to_best_ms = Math.round((plan.total_time_ms - best) * 10) / 10;
+  });
+
+  const sessionsUsed: StrategySessionUsed[] = sessions.map((s) => ({
+    id: s.id,
+    session_type: s.type,
+    session_type_name: s.typeName,
+    evidence: s.type >= 10 ? 'race' : 'practice',
+    started_at_wall: BASE_WALL + s.startedOffset,
+    contributed: evidence
+      .filter((e) => e.sessionId === s.id)
+      .flatMap((e) => [`${e.name.toLowerCase()} pace`, `${e.name.toLowerCase()} wear`])
+      .concat(s.id === HEADLINE_SESSION_ID ? ['fuel burn', 'pit-lane loss'] : [])
+      .sort()
+  }));
+
+  const omitted: Record<string, string> = {};
+  if (plans.length === 0) {
+    omitted['plans'] =
+      'no legal plan: the two-compound rule needs two dry compounds with a model and this ' +
+      `weekend has ${plannable.length}.`;
+  }
+
+  return {
+    track_id: trackId,
+    track_name: sessions[0]?.trackName ?? null,
+    race_laps: laps,
+    race_laps_source: source,
+    wear_cliff_pct: WEAR_CLIFF_PCT,
+    compounds,
+    plans: plans.slice(0, MAX_PLANS),
+    plans_considered: plans.length,
+    fuel: {
+      kg_per_lap: FUEL_KG_PER_LAP,
+      laps_measured: 16,
+      evidence: 'race',
+      session_ids: [HEADLINE_SESSION_ID],
+      race_laps: laps,
+      margin_laps: FUEL_MARGIN_LAPS,
+      slider_laps: Math.round((laps + FUEL_MARGIN_LAPS) * 100) / 100,
+      recommended_kg: Math.round((laps + FUEL_MARGIN_LAPS) * FUEL_KG_PER_LAP * 100) / 100
+    },
+    pit_loss_s: PIT_LOSS_S,
+    pit_loss: {
+      seconds: PIT_LOSS_S,
+      source: 'measured',
+      stops_measured: 1,
+      stops: [
+        {
+          session_id: HEADLINE_SESSION_ID,
+          stop_after_stint: 1,
+          laps: [PIT_IN_LAP, PIT_OUT_LAP],
+          loss_s: PIT_LOSS_S
+        }
+      ],
+      detail:
+        'median of 1 stop(s) measured at this circuit, each as the pit lap’s excess over ' +
+        'the driver’s own clean-lap median in the same race'
+    },
+    sessions_used: sessionsUsed,
+    omitted
+  };
+}
+
 // ── transport interception ───────────────────────────────────────────────────
 
 export interface MockResponse {
@@ -1297,6 +1681,12 @@ export function handleMockRequest(rawUrl: string): MockResponse | null {
     const sid = num(p.get('session_id'));
     if (sid === null) return { status: 422, body: { detail: 'session_id is required' } };
     return asResponse(mockStints(sid));
+  }
+
+  if (path === '/api/analysis/strategy') {
+    const track = num(p.get('track_id'));
+    if (track === null) return { status: 422, body: { detail: 'track_id is required' } };
+    return asResponse(mockStrategy(track, num(p.get('race_laps'))));
   }
 
   return { status: 404, body: { detail: 'not found' } };

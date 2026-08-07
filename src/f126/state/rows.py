@@ -35,6 +35,7 @@ from f126.types import (
     EventView,
     LapView,
     MotionView,
+    PacketHeader,
     ParsedPacket,
     ParticipantsView,
     SessionView,
@@ -177,6 +178,12 @@ class RowBuilder:
         # A flashback rewinds tyre wear; the abandoned timeline's peak would overstate
         # the stint's real end wear. Re-seed from post-rewind damage packets.
         self._stint_wear_peak = None
+        # Same argument, applied to the per-lap accumulators: fuel, top speed and the ERS
+        # counters recorded since the last crossing describe running that has been undone.
+        # Left in place they are attached to the *re-driven* lap, which is then written
+        # under the new generation carrying the abandoned timeline's numbers. Cleared
+        # rather than re-seeded from `self._status`, whose fuel is the pre-rewind figure.
+        self._clear_lap_accumulators()
         if abs(rewind_to_session_time - self._last_flbk_t) > _FLBK_DEDUPE_S:
             self._last_flbk_t = rewind_to_session_time
             self._emit_event_row(
@@ -250,11 +257,30 @@ class RowBuilder:
 
     # -- packet fan-in -------------------------------------------------------
 
-    def feed(self, pkt: ParsedPacket) -> None:
-        header = pkt.header
-        self._last_wall = pkt.recv_wall_ns / 1e9
+    def observe_header(self, header: PacketHeader) -> None:
+        """Absorb the header of a packet that has not been dispatched yet.
+
+        Which car is ours is a property of the header, and `on_lap()` needs it — but the
+        lap ledger that calls `on_lap()` lives in the tracker, and the tracker is fed
+        *before* this builder is (`state/__init__.py`: lifecycle callbacks must land before
+        the packet that caused them is written out). Deriving `_player_index` only inside
+        `feed()` therefore left it one packet stale, which for the very first packet of a
+        process means the initialisation value 0 — and in a real career session the player
+        is car 21, so any lap published from that packet was matched against the wrong car
+        and written with an empty per-lap context.
+
+        `StateBundle.feed()` calls this first so the index is never behind the callbacks
+        that read it. Deliberately narrow: it touches nothing a discarded packet could
+        corrupt (`_last_wall` and every view stay in `feed()`), so calling it for a packet
+        the reorder guard then drops is harmless.
+        """
         self._packet_format = header.packet_format
         self._player_index = header.player_car_index
+
+    def feed(self, pkt: ParsedPacket) -> None:
+        header = pkt.header
+        self.observe_header(header)
+        self._last_wall = pkt.recv_wall_ns / 1e9
         if self._key is None:
             return
         if self._started_wall is None:
@@ -560,8 +586,13 @@ class RowBuilder:
             self._capture_lap_context(self._player_lap, player.penalties_s)
             self._player_lap = player.lap_number
         elif player.lap_number < self._player_lap:
+            # Rewound onto an earlier lap (flashback). Everything this builder snapshotted
+            # for that lap and the ones after it describes running that has been undone;
+            # keeping it would attach the abandoned timeline's fuel and top speed to the
+            # re-driven lap when the ledger re-publishes it under the new generation.
+            self._drop_lap_context_from(player.lap_number)
             self._player_lap = player.lap_number
-            self._reset_lap_accumulators()
+            self._clear_lap_accumulators()
 
     def _capture_lap_context(self, lap_number: int, penalties_s: int) -> None:
         if lap_number in self._lap_context:
@@ -583,12 +614,37 @@ class RowBuilder:
         self._reset_lap_accumulators()
 
     def _reset_lap_accumulators(self) -> None:
+        """Start the next lap's accumulators. Fuel is seeded from the tank we can see now.
+
+        Seeding fuel (rather than clearing it) is what makes `fuel_start_kg` the value at
+        the line rather than at the first CarStatus of the new lap, which can be a second
+        of running later.
+        """
         self._top_speed = 0.0
         fuel = self._status.fuel_in_tank_kg if self._status else None
         self._fuel_max = fuel
         self._fuel_min = fuel
         self._ers_deployed = None
         self._ers_harvested = None
+
+    def _clear_lap_accumulators(self) -> None:
+        """Forget the current lap's accumulators entirely, seeding nothing.
+
+        The flashback counterpart of `_reset_lap_accumulators`: after a rewind the last
+        CarStatus we hold is from the abandoned timeline, so seeding fuel from it would
+        plant a tank reading the car never had on the lap about to be re-driven. The next
+        CarStatus packet seeds them with post-rewind values.
+        """
+        self._top_speed = 0.0
+        self._fuel_max = None
+        self._fuel_min = None
+        self._ers_deployed = None
+        self._ers_harvested = None
+
+    def _drop_lap_context_from(self, lap_number: int) -> None:
+        """Forget snapshots for `lap_number` and everything after it (a flashback)."""
+        for lap in [lap for lap in self._lap_context if lap >= lap_number]:
+            del self._lap_context[lap]
 
     # tyre stints ------------------------------------------------------------
 

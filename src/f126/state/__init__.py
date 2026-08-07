@@ -13,7 +13,11 @@ that:
 
 Ordering inside `feed()` matters and is deliberate: the tracker runs first so
 lifecycle callbacks (open/segment/generation) land before the packet that caused
-them is applied to the live view or written out.
+them is applied to the live view or written out. The one thing that has to
+precede the tracker is the packet *header* reaching the row builder, because the
+tracker's lap ledger publishes completed laps through `on_lap()` from inside
+`tracker.feed()`, and `on_lap()` cannot attribute a lap to the player without
+knowing which car index that is.
 """
 
 from __future__ import annotations
@@ -78,6 +82,12 @@ class StateBundle:
 
     def feed(self, pkt: ParsedPacket) -> bool:
         """Returns False when the reorder guard dropped the packet."""
+        if self.rows is not None:
+            # Header first, dispatch second. `tracker.feed()` publishes completed laps
+            # through `on_lap()` from inside itself, and `on_lap()` has to know which car
+            # is the player — which only the header says. Reading it after the tracker has
+            # run left the row builder a packet behind its own callbacks.
+            self.rows.observe_header(pkt.header)
         if not self.tracker.feed(pkt):
             return False
         self.live.update(pkt)

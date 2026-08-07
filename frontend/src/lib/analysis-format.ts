@@ -161,6 +161,48 @@ export function displayStintRanges(
   return ranges;
 }
 
+// ── strategy ─────────────────────────────────────────────────────────────────
+
+/**
+ * How much of the game's on-screen wear gauge one telemetry percent is worth.
+ *
+ * The UDP stream and the in-car display do not agree: a set reading 28 % in the
+ * telemetry shows roughly 56 % on the OSD. The ratio is **uncalibrated** — it is
+ * an eyeball comparison across two races, not a measurement — so it is used for
+ * one thing only, annotating a number the driver will also see in the car, and
+ * never inside a calculation. Every model on the strategy page works in
+ * telemetry percent.
+ */
+export const IN_GAME_WEAR_FACTOR = 2;
+
+/** `28` -> `"≈56% OSD"`. Always rendered as an approximation, beside the real figure. */
+export function inGameWear(pct: number | null | undefined): string {
+  if (pct == null || !Number.isFinite(pct)) return DASH;
+  return `≈${Math.round(pct * IN_GAME_WEAR_FACTOR)}%`;
+}
+
+/**
+ * A projected race time: `1253110` -> `"20:53"`.
+ *
+ * Seconds and no finer. The number is a model output over dozens of laps, and
+ * rendering it to the millisecond would claim a precision the fit does not have.
+ */
+export function formatMinutesSeconds(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return DASH;
+  const total = Math.round(ms / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+/** Signed seconds against a reference plan: `1580` -> `"+1.6"`. */
+export function formatSecondsDelta(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return DASH;
+  const seconds = ms / 1000;
+  const sign = seconds > 0 ? '+' : seconds < 0 ? '−' : '±';
+  return `${sign}${Math.abs(seconds).toFixed(1)}`;
+}
+
 /** Corner kind as the table renders it. */
 export const CORNER_KIND_LABEL: Record<string, string> = {
   slow: 'Slow',

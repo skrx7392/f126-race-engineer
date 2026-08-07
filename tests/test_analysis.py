@@ -15,7 +15,7 @@ Tier 2 (`tests/test_analysis_api.py`) puts the same code in front of real Bahrai
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -23,6 +23,7 @@ import pytest
 from f126.analysis import corners as corners_mod
 from f126.analysis import resample as resample_mod
 from f126.analysis import stints as stints_mod
+from f126.analysis import strategy as strategy_mod
 from f126.analysis.compare import LapRef, compare_laps
 from f126.analysis.corners import analyse_corners, brake_point, find_apexes, smooth_speed
 from f126.analysis.resample import (
@@ -35,6 +36,10 @@ from f126.analysis.resample import (
     trace_from_rows,
 )
 from f126.analysis.stints import build_stints, derive_stints, fit_degradation
+from f126.analysis.strategy import build_strategy
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 # --------------------------------------------------------------------------------------------
 # Synthetic laps
@@ -678,3 +683,364 @@ def test_stint_payload_is_json_ready() -> None:
     laps = degrading_laps(1, 6)
     payload = build_stints(1, [{"car_index": 0, "stint_no": 1, "lap_start": 1, "lap_end": 6}], laps)
     assert json.loads(json.dumps(payload))["session_id"] == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Strategy
+# --------------------------------------------------------------------------------------------
+#
+# The numbers asserted here are the ones two real races produced (see `decisions.md`): softs
+# at 5.9-6.1 %/lap in race trim, a 28-31 % cliff, ~1.05 kg/lap at Miami and ~1.26 at Jeddah,
+# and a pit-lane loss in the mid-teens. The fixtures below are shaped to those figures so a
+# regression in the model reads as an implausible race, not just a changed number.
+
+
+def strategy_session(
+    session_id: int,
+    session_type: int,
+    *,
+    name: str | None = None,
+    total_laps: int | None = None,
+    started: float = 1_786_100_000.0,
+    player: int = 21,
+) -> dict[str, Any]:
+    return {
+        "id": session_id,
+        "session_type": session_type,
+        "session_type_name": name or f"Session {session_type}",
+        "track_id": 30,
+        "track_name": "Miami",
+        "total_laps": total_laps,
+        "started_at_wall": started,
+        "player_car_index": player,
+    }
+
+
+def race_laps_rows(
+    specs: Sequence[tuple[int, int, int, float, float]],
+    *,
+    car_index: int = 21,
+    fuel_start: float = 15.0,
+    burn: float = 1.05,
+) -> list[dict[str, Any]]:
+    """Laps from `(lap_number, compound, tyre_age, lap_time_ms, wear_at_end)` tuples."""
+    rows = []
+    fuel = fuel_start
+    for lap, compound, age, lap_ms, _wear in specs:
+        rows.append(
+            {
+                "session_id": 1,
+                "car_index": car_index,
+                "lap_number": lap,
+                "generation": 0,
+                "lap_time_ms": int(lap_ms),
+                "valid": True,
+                "compound_actual": compound,
+                "compound_visual": compound,
+                "tyre_age_laps": age,
+                "fuel_start_kg": round(fuel, 3),
+                "fuel_end_kg": round(fuel - burn, 3),
+            }
+        )
+        fuel -= burn
+    return rows
+
+
+def wear_rows(session_id: int, per_lap: Mapping[int, float]) -> list[dict[str, Any]]:
+    return [
+        {"session_id": session_id, "lap_number": lap, "max_wear_pct": pct}
+        for lap, pct in sorted(per_lap.items())
+    ]
+
+
+def two_stint_race() -> tuple[list[dict[str, Any]], dict[int, Any], dict[int, Any], dict[int, Any]]:
+    """A 13-lap race: six laps on softs, a stop, seven on mediums. Jeddah's shape."""
+    sessions = [strategy_session(115, 15, name="Race", total_laps=13)]
+    laps = race_laps_rows(
+        [
+            (1, 16, 0, 95_364, 6.1),
+            (2, 16, 1, 92_472, 12.2),
+            (3, 16, 2, 92_342, 18.3),
+            (4, 16, 3, 93_255, 24.4),
+            (5, 16, 4, 95_277, 30.5),
+            (6, 17, 0, 110_415, 0.0),  # the stop: in-lap and out-lap in one
+            (7, 17, 1, 93_979, 4.0),
+            (8, 17, 2, 93_843, 8.0),
+            (9, 17, 3, 94_589, 12.0),
+            (10, 17, 4, 94_162, 16.0),
+            (11, 17, 5, 94_011, 20.0),
+            (12, 17, 6, 93_916, 24.0),
+        ],
+        burn=1.26,
+    )
+    stints = [
+        {"session_id": 115, "car_index": 21, "stint_no": 1, "compound_visual": 16,
+         "lap_start": 1, "lap_end": 6, "wear_at_end_json": {"tyre_wear_pct": [30.5, 28, 24, 26]}},
+        {"session_id": 115, "car_index": 21, "stint_no": 2, "compound_visual": 17,
+         "lap_start": 6, "lap_end": 13, "wear_at_end_json": {"tyre_wear_pct": [27.0, 25, 22, 23]}},
+    ]
+    wear = wear_rows(
+        115,
+        {1: 6.1, 2: 12.2, 3: 18.3, 4: 24.4, 5: 30.5, 6: 30.5,
+         7: 4.0, 8: 8.0, 9: 12.0, 10: 16.0, 11: 20.0, 12: 24.0},
+    )
+    return sessions, {115: stints}, {115: laps}, {115: wear}
+
+
+def build_two_stint_strategy(**overrides: Any) -> dict[str, Any]:
+    sessions, stints, laps, wear = two_stint_race()
+    kwargs: dict[str, Any] = {
+        "race_laps": 13,
+        "race_laps_source": "Race (session 115)",
+        "track_name": "Jeddah",
+    }
+    kwargs.update(overrides)
+    return build_strategy(30, sessions, stints, laps, wear, **kwargs)
+
+
+def test_strategy_models_every_compound_it_saw_and_confesses_the_ones_it_did_not() -> None:
+    payload = build_two_stint_strategy()
+    by_compound = {c["compound_visual"]: c for c in payload["compounds"]}
+
+    # All three dry compounds are always listed, tested or not.
+    assert set(by_compound) >= {16, 17, 18}
+
+    soft = by_compound[16]
+    assert soft["untested"] is False
+    assert soft["evidence"] == "race"
+    assert soft["pace"]["deg_ms_per_lap"] is not None
+    assert soft["wear"]["pct_per_lap"] == pytest.approx(6.1, abs=0.2)
+    assert soft["wear"]["source"] == "wear_samples"
+    assert soft["plannable"] is True
+
+    # The hard was never fitted this weekend. It appears, empty, and says why.
+    hard = by_compound[18]
+    assert hard["untested"] is True
+    assert hard["pace"] is None
+    assert hard["wear"] is None
+    assert hard["max_stint_laps"] is None
+    assert hard["plannable"] is False
+    assert "no stint" in hard["not_plannable_reason"]
+
+
+def test_strategy_caps_a_stint_at_the_wear_cliff() -> None:
+    payload = build_two_stint_strategy()
+    by_compound = {c["compound_visual"]: c for c in payload["compounds"]}
+    assert payload["wear_cliff_pct"] == strategy_mod.WEAR_CLIFF_PCT
+
+    # 6.1 %/lap into a 28 % ceiling is four laps, not the five the driver actually ran to
+    # 30.5 % — the point of the ceiling is that it stops short of the collapse.
+    assert by_compound[16]["max_stint_laps"] == 4
+    for plan in payload["plans"]:
+        for stint in plan["stints"]:
+            assert stint["projected_end_wear_pct"] <= strategy_mod.WEAR_CLIFF_PCT
+
+
+def test_strategy_plans_obey_the_two_compound_rule_and_cover_the_distance() -> None:
+    payload = build_two_stint_strategy()
+    assert payload["plans"], "a two-compound weekend must produce at least one plan"
+    for plan in payload["plans"]:
+        assert len(set(plan["compounds"])) >= 2
+        assert sum(stint["laps"] for stint in plan["stints"]) == payload["race_laps"]
+        assert plan["stints"][0]["lap_start"] == 1
+        assert plan["stints"][-1]["lap_end"] == payload["race_laps"]
+        assert plan["stops"] == len(plan["stints"]) - 1
+        assert len(plan["pit_windows"]) == plan["stops"]
+
+
+def test_strategy_ranks_plans_by_projected_time() -> None:
+    payload = build_two_stint_strategy()
+    times = [plan["total_time_ms"] for plan in payload["plans"]]
+    assert times == sorted(times)
+    assert [plan["rank"] for plan in payload["plans"]] == list(range(1, len(times) + 1))
+    assert payload["plans"][0]["delta_to_best_ms"] == 0
+    assert all(plan["delta_to_best_ms"] >= 0 for plan in payload["plans"])
+
+
+def test_strategy_pit_windows_bracket_the_planned_stop() -> None:
+    payload = build_two_stint_strategy()
+    for plan in payload["plans"]:
+        for window in plan["pit_windows"]:
+            assert window["earliest_lap"] <= window["planned_lap"] <= window["latest_lap"]
+            assert window["window_laps"] == window["latest_lap"] - window["earliest_lap"]
+        assert plan["safety_car"]["flexibility"] in ("flexible", "tight", "none")
+        assert plan["safety_car"]["note"]
+
+
+def test_strategy_measures_pit_loss_from_the_weekends_own_stop() -> None:
+    payload = build_two_stint_strategy()
+    loss = payload["pit_loss"]
+    assert loss["source"] == "measured"
+    assert loss["stops_measured"] == 1
+    # 110.4 s pit lap against a ~94 s clean-lap median.
+    assert payload["pit_loss_s"] == pytest.approx(16.5, abs=1.0)
+    assert loss["stops"][0]["laps"] == [6]
+
+
+def test_strategy_falls_back_to_a_named_pit_loss_and_says_so() -> None:
+    """A weekend with no stop must not silently borrow a number from somewhere."""
+    sessions = [strategy_session(1, 15, name="Race", total_laps=6)]
+    laps = race_laps_rows([(lap, 16, lap - 1, 92_000 + lap * 60, 0.0) for lap in range(1, 7)])
+    stints = {
+        1: [
+            {"session_id": 1, "car_index": 21, "stint_no": 1, "compound_visual": 16,
+             "lap_start": 1, "lap_end": 6, "wear_at_end_json": {"tyre_wear_pct": [24, 22, 20, 21]}}
+        ]
+    }
+    payload = build_strategy(
+        30, sessions, stints, {1: laps}, {}, race_laps=6, race_laps_source="request"
+    )
+    assert payload["pit_loss_s"] == strategy_mod.DEFAULT_PIT_LOSS_S
+    assert payload["pit_loss"]["source"] == "default"
+    assert "no pit stop" in payload["pit_loss"]["detail"]
+
+
+def test_strategy_fuel_recommendation_matches_the_tank_the_race_was_run_on() -> None:
+    payload = build_two_stint_strategy()
+    fuel = payload["fuel"]
+    assert fuel["evidence"] == "race"
+    assert fuel["kg_per_lap"] == pytest.approx(1.26, abs=0.02)
+    assert fuel["slider_laps"] == pytest.approx(13.45, abs=0.001)
+    assert fuel["recommended_kg"] == pytest.approx(13.45 * 1.26, abs=0.1)
+    assert "fuel" not in payload["omitted"]
+
+
+def test_strategy_omits_fuel_rather_than_inventing_it() -> None:
+    """Historical captures have NULL fuel columns; the sheet must say so, not guess."""
+    sessions, stints, laps, wear = two_stint_race()
+    stripped = {
+        sid: [{k: v for k, v in row.items() if not k.startswith("fuel_")} for row in rows]
+        for sid, rows in laps.items()
+    }
+    payload = build_strategy(
+        30, sessions, stints, stripped, wear, race_laps=13, race_laps_source="request"
+    )
+    assert payload["fuel"] is None
+    assert "insufficient fuel data" in payload["omitted"]["fuel"]
+    # Everything that does not depend on fuel still came out.
+    assert payload["plans"]
+    assert payload["pit_loss"]["source"] == "measured"
+
+
+def test_strategy_prefers_race_trim_over_practice_for_the_same_compound() -> None:
+    """Practice softs wear at roughly twice race-trim rate; the tier decides which wins."""
+    sessions, stints, laps, wear = two_stint_race()
+    sessions.append(strategy_session(9, 1, name="Practice 1", started=1_786_000_000.0))
+    stints[9] = [
+        {"session_id": 9, "car_index": 21, "stint_no": 1, "compound_visual": 16,
+         "lap_start": 1, "lap_end": 6, "wear_at_end_json": {"tyre_wear_pct": [60, 55, 50, 52]}}
+    ]
+    laps[9] = race_laps_rows([(lap, 16, lap - 1, 90_000 + lap * 500, 0.0) for lap in range(1, 7)])
+    wear[9] = wear_rows(9, {lap: 10.0 * lap for lap in range(1, 7)})
+
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=13, race_laps_source="request"
+    )
+    soft = next(c for c in payload["compounds"] if c["compound_visual"] == 16)
+    assert soft["evidence"] == "race"
+    assert soft["wear"]["evidence"] == "race"
+    assert soft["wear"]["session_id"] == 115
+    assert soft["pace"]["session_id"] == 115
+    # The practice session is still listed as read, with what it did (and did not) give.
+    used = {s["id"]: s for s in payload["sessions_used"]}
+    assert used[9]["evidence"] == "practice"
+    assert used[115]["contributed"]
+
+
+def test_strategy_uses_practice_when_that_is_all_there_is() -> None:
+    sessions = [strategy_session(9, 1, name="Practice 1")]
+    laps = race_laps_rows([(lap, 16, lap - 1, 92_000 + lap * 90, 0.0) for lap in range(1, 9)])
+    stints = {
+        9: [
+            {"session_id": 9, "car_index": 21, "stint_no": 1, "compound_visual": 16,
+             "lap_start": 1, "lap_end": 8, "wear_at_end_json": {"tyre_wear_pct": [24, 22, 20, 21]}}
+        ]
+    }
+    payload = build_strategy(
+        30, sessions, stints, {9: laps}, {}, race_laps=8, race_laps_source="request"
+    )
+    soft = next(c for c in payload["compounds"] if c["compound_visual"] == 16)
+    assert soft["evidence"] == "practice"
+    assert soft["wear"]["source"] == "stint_end_wear"
+    assert payload["fuel"]["evidence"] == "practice"
+
+
+def test_strategy_never_plans_on_a_wet_compound() -> None:
+    sessions, stints, laps, wear = two_stint_race()
+    sessions.append(strategy_session(183, 14, name="One-Shot Sprint Shootout"))
+    stints[183] = [
+        {"session_id": 183, "car_index": 21, "stint_no": 1, "compound_visual": 7,
+         "lap_start": 1, "lap_end": 8, "wear_at_end_json": {"tyre_wear_pct": [4, 4, 3, 3]}}
+    ]
+    laps[183] = race_laps_rows([(lap, 7, lap - 1, 99_000 + lap * 20, 0.0) for lap in range(1, 9)])
+    wear[183] = wear_rows(183, {lap: 0.5 * lap for lap in range(1, 9)})
+
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=13, race_laps_source="request"
+    )
+    inter = next(c for c in payload["compounds"] if c["compound_visual"] == 7)
+    assert inter["dry"] is False
+    assert inter["untested"] is False
+    assert inter["plannable"] is False
+    assert "wet-weather" in inter["not_plannable_reason"]
+    assert all(7 not in plan["compounds"] for plan in payload["plans"])
+
+
+def test_strategy_refuses_to_plan_a_race_the_tyres_cannot_reach() -> None:
+    """Two stops of soft-only running cannot cover 40 laps under the cliff, and it says so."""
+    payload = build_two_stint_strategy(race_laps=40)
+    assert payload["plans"] == []
+    assert "no legal plan" in payload["omitted"]["plans"]
+
+
+def test_strategy_says_why_one_compound_is_not_enough() -> None:
+    """The Miami shape: only the soft was run long enough to model."""
+    sessions = [strategy_session(229, 16, name="Race 2", total_laps=14)]
+    laps = race_laps_rows([(lap, 16, lap - 1, 89_000 + lap * 1_100, 0.0) for lap in range(1, 7)])
+    stints = {
+        229: [
+            {"session_id": 229, "car_index": 21, "stint_no": 1, "compound_visual": 16,
+             "lap_start": 1, "lap_end": 7,
+             "wear_at_end_json": {"tyre_wear_pct": [34.7, 33, 26, 33]}}
+        ]
+    }
+    wear = {229: wear_rows(229, {lap: 5.8 * lap for lap in range(1, 7)})}
+    payload = build_strategy(
+        30, sessions, stints, {229: laps}, wear, race_laps=14, race_laps_source="request"
+    )
+    assert payload["plans"] == []
+    assert "two-compound rule" in payload["omitted"]["plans"]
+    assert payload["plans_considered"] == 0
+
+
+def test_strategy_is_deterministic_and_json_ready() -> None:
+    import json
+
+    first = build_two_stint_strategy()
+    second = build_two_stint_strategy()
+    assert first == second
+    assert json.loads(json.dumps(first)) == first
+
+
+def test_strategy_finds_the_player_wherever_the_game_put_them() -> None:
+    """Car 21 is where a real career session puts the player; car 0 is an AI."""
+    sessions, stints, laps, wear = two_stint_race()
+    mine = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=13, race_laps_source="request"
+    )
+    # The same rows relabelled onto car 0, with the session saying so, must model the same.
+    moved_sessions = [dict(s, player_car_index=0) for s in sessions]
+    moved_stints = {sid: [dict(r, car_index=0) for r in rows] for sid, rows in stints.items()}
+    moved_laps = {sid: [dict(r, car_index=0) for r in rows] for sid, rows in laps.items()}
+    moved = build_strategy(
+        30, moved_sessions, moved_stints, moved_laps, wear, race_laps=13,
+        race_laps_source="request",
+    )
+    assert [c["pace"] for c in mine["compounds"]] == [c["pace"] for c in moved["compounds"]]
+
+    # ...and an AI's rows sharing the session must not be picked up as ours.
+    with_ai = {sid: [*rows, *[dict(r, car_index=3) for r in rows]] for sid, rows in laps.items()}
+    unchanged = build_strategy(
+        30, sessions, stints, with_ai, wear, race_laps=13, race_laps_source="request"
+    )
+    assert unchanged["compounds"] == mine["compounds"]

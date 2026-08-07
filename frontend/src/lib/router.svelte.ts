@@ -19,6 +19,7 @@ export type RouteName =
   | 'compare'
   | 'corners'
   | 'stints'
+  | 'strategy'
   | 'notfound';
 
 export interface Route {
@@ -38,6 +39,7 @@ const ANALYSIS_ROUTES: ReadonlySet<RouteName> = new Set([
   'compare',
   'corners',
   'stints',
+  'strategy',
   'notfound'
 ]);
 
@@ -81,6 +83,7 @@ export function parseHash(hash: string): Route {
     if (head === 'compare') return { name: 'compare', path, params: empty, query };
     if (head === 'corners') return { name: 'corners', path, params: empty, query };
     if (head === 'stints') return { name: 'stints', path, params: empty, query };
+    if (head === 'strategy') return { name: 'strategy', path, params: empty, query };
   }
 
   return { name: 'notfound', path, params: empty, query };

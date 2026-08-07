@@ -22,6 +22,7 @@
   import ComparePage from './routes/ComparePage.svelte';
   import CornersPage from './routes/CornersPage.svelte';
   import StintsPage from './routes/StintsPage.svelte';
+  import StrategyPage from './routes/StrategyPage.svelte';
 
   $effect(() => router.start());
 
@@ -46,6 +47,12 @@
   /** Read the reference lap out of another session at the same circuit. */
   let cornerRefSession = $derived(intParam(route.query, 'ref_session'));
   let stintSession = $derived(intParam(route.query, 'session') ?? analysis.a?.sessionId ?? null);
+
+  /* Strategy addresses a *circuit*, not a session — a strategy sheet is built from the
+     whole weekend at one track — so it takes its own two parameters and falls back to
+     nothing rather than to the lap selection. */
+  let strategyTrack = $derived(intParam(route.query, 'track'));
+  let strategyLaps = $derived(intParam(route.query, 'laps'));
 </script>
 
 {#if route.name === 'pitwall'}
@@ -69,6 +76,8 @@
         />
       {:else if route.name === 'stints'}
         <StintsPage sessionId={stintSession} />
+      {:else if route.name === 'strategy'}
+        <StrategyPage trackId={strategyTrack} raceLaps={strategyLaps} />
       {:else}
         <section class="analysis-page" data-page="notfound">
           <h1 class="page-title">No such page</h1>

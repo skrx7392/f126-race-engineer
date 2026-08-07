@@ -173,6 +173,22 @@ def derive_stints(lap_rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]
     return stints
 
 
+def pit_flags(position: int, count: int) -> tuple[bool, bool]:
+    """`(after_pit, before_pit)` for the stint at `position` of `count` in one car's run.
+
+    A stint that is not the car's first began with a pit stop, so its first lap is an
+    out-lap; one that is not the car's last ended with a pit stop, so its last lap is an
+    in-lap. Both are real laps of the stint and both are useless for measuring how the set
+    behaved — the tyre spent part of them in the pit lane.
+
+    A function rather than two inline comparisons because `strategy.py` needs the identical
+    rule to decide which laps of a stint a wear reading may be taken over, and the two
+    modules disagreeing about where a stint's usable running starts would put the pit lap's
+    wear into a per-lap rate.
+    """
+    return position > 0, position < count - 1
+
+
 def _classify_laps(
     laps: list[Mapping[str, Any]],
     *,
@@ -255,17 +271,9 @@ def build_stints(
     for car, group in sorted(by_car.items(), key=lambda item: (item[0] is None, item[0])):
         car_laps = [row for row in laps if _int_or_none(row.get("car_index")) == car]
         for position, stint in enumerate(group):
+            after_pit, before_pit = pit_flags(position, len(group))
             payload.append(
-                _one_stint(
-                    stint,
-                    car_laps,
-                    # A stint that is not the car's first began with a pit stop, so its
-                    # first lap is an out-lap; one that is not the car's last ended with a
-                    # pit stop, so its last lap is an in-lap. Both are real laps of the
-                    # stint and both are useless for measuring degradation.
-                    after_pit=position > 0,
-                    before_pit=position < len(group) - 1,
-                )
+                _one_stint(stint, car_laps, after_pit=after_pit, before_pit=before_pit)
             )
     return {"session_id": int(session_id), "stints": payload}
 

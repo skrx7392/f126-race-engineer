@@ -52,13 +52,15 @@ describe('#/sessions', () => {
     expect(table.querySelectorAll('tbody tr')).toHaveLength(expected.length);
   });
 
-  it('shows the five documented columns', async () => {
+  it('shows the five documented columns, plus the strategy exit', async () => {
     restore = installAnalysisMock();
     render(App);
 
     const table = await screen.findByTestId('sessions-table');
     const headers = [...table.querySelectorAll('thead th')].map((th) => th.textContent?.trim());
-    expect(headers).toEqual(['Date', 'Track', 'Type', 'Laps', 'Best lap']);
+    // The trailing header is visually hidden — it labels the per-circuit strategy link
+    // for a screen reader and adds no sixth column of data.
+    expect(headers).toEqual(['Date', 'Track', 'Type', 'Laps', 'Best lap', 'Strategy']);
   });
 
   it('puts the track, type and lap count of each session on its row', async () => {

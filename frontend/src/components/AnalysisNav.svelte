@@ -33,7 +33,10 @@
       name: 'stints' as RouteName,
       label: 'Stints',
       to: href('/stints', { session: sessionId })
-    }
+    },
+    // Strategy is track-scoped, so it carries no lap selection — it is reached with no
+    // parameters and picks a circuit for itself.
+    { name: 'strategy' as RouteName, label: 'Strategy', to: href('/strategy') }
   ]);
 </script>
 

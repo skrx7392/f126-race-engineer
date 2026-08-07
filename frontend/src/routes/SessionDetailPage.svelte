@@ -479,6 +479,16 @@
               Corner analysis
             </a>
             <a class="btn" href={href('/stints', { session: sessionId })}>Stints</a>
+            <!--
+              Strategy is scoped to the circuit rather than to this session, so the link
+              carries the track and nothing else — it is the whole weekend's answer, not
+              this session's.
+            -->
+            {#if s.track_id != null && s.track_id >= 0}
+              <a class="btn" href={href('/strategy', { track: s.track_id })}>
+                Strategy for {s.track_name ?? 'this circuit'}
+              </a>
+            {/if}
             {#if analysis.paired}
               <button class="btn" type="button" onclick={() => analysis.swap()}>Swap A/B</button>
             {/if}

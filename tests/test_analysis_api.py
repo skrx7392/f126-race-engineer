@@ -74,6 +74,7 @@ ANALYSIS_PATHS = (
     "/api/analysis/compare?session_a=1&lap_a=1&session_b=1&lap_b=2",
     "/api/analysis/corners?session_id=1&lap=5",
     "/api/analysis/stints?session_id=1",
+    "/api/analysis/strategy?track_id=3",
 )
 
 
@@ -158,6 +159,12 @@ async def test_query_parameters_are_bounded() -> None:
             "/api/analysis/corners?session_id=1",  # lap missing
             "/api/analysis/stints",  # session_id missing
             "/api/analysis/stints?session_id=1&car_index=22",
+            "/api/analysis/strategy",  # track_id missing
+            # -1 is the recorder's "no Session packet" sentinel, not a circuit.
+            "/api/analysis/strategy?track_id=-1",
+            "/api/analysis/strategy?track_id=abc",
+            "/api/analysis/strategy?track_id=3&race_laps=0",
+            "/api/analysis/strategy?track_id=3&race_laps=500",
         )
         for path in cases:
             assert (await client.get(path)).status_code == 422, path
@@ -205,6 +212,7 @@ def test_the_router_is_wired_into_the_app() -> None:
     assert "/api/analysis/compare" in paths
     assert "/api/analysis/corners" in paths
     assert "/api/analysis/stints" in paths
+    assert "/api/analysis/strategy" in paths
     assert "/api/sessions/{session_id}/laps/{lap_number}/telemetry" in paths
     assert "/api/sessions" in paths, "the Phase 1 routes must survive the Phase 2 include"
 
@@ -873,3 +881,70 @@ async def test_telemetry_distance_axis_is_strictly_increasing(api: Any, real_ses
     for name, values in payload.items():
         if isinstance(values, list):
             assert len(values) == len(distance), f"channel {name} is not index-aligned"
+
+
+# --------------------------------------------------------------------------------------------
+# Strategy (tier 2)
+# --------------------------------------------------------------------------------------------
+
+
+async def test_strategy_404s_for_a_track_with_nothing_recorded_at_it(api: Any) -> None:
+    response = await api.get("/api/analysis/strategy?track_id=999")
+    assert response.status_code == 404
+    assert "track" in response.json()["detail"]
+
+
+async def test_strategy_422s_when_no_race_has_ever_named_its_distance(
+    api: Any, real_session: int
+) -> None:
+    """The capture is a practice session. Guessing how long the race is would decide the
+    stop count for the driver, so the endpoint refuses and says what to pass instead."""
+    track = await _get(api, f"/api/sessions/{real_session}")
+    response = await api.get(f"/api/analysis/strategy?track_id={track['track_id']}")
+    assert response.status_code == 422
+    assert "race_laps" in response.json()["detail"]
+
+
+async def test_strategy_reads_the_real_weekend_and_invents_nothing(
+    api: Any, real_session: int, sibling_sessions: tuple[int, int]
+) -> None:
+    same_track, _other = sibling_sessions
+    track = await _get(api, f"/api/sessions/{real_session}")
+    payload = await _get(
+        api, f"/api/analysis/strategy?track_id={track['track_id']}&race_laps=12"
+    )
+
+    assert payload["track_id"] == track["track_id"]
+    assert payload["race_laps"] == 12
+    assert payload["race_laps_source"] == "request"
+    assert payload["wear_cliff_pct"] > 0
+
+    # Both same-track sessions were read; the one at another circuit was not.
+    read = {row["id"] for row in payload["sessions_used"]}
+    assert {real_session, same_track} & read
+
+    # Every dry compound is accounted for, one way or the other.
+    by_compound = {row["compound_visual"]: row for row in payload["compounds"]}
+    assert {16, 17, 18} <= set(by_compound)
+    for row in payload["compounds"]:
+        if row["untested"]:
+            assert row["pace"] is None and row["wear"] is None
+            assert row["max_stint_laps"] is None
+            assert row["plannable"] is False
+        if not row["plannable"]:
+            assert row["not_plannable_reason"]
+
+    # A pit loss always comes back, and always says where it came from.
+    assert payload["pit_loss"]["source"] in ("measured", "default")
+    assert payload["pit_loss_s"] > 0
+
+    # Plans, when there are any, cover the distance on at least two compounds.
+    for plan in payload["plans"]:
+        assert len(set(plan["compounds"])) >= 2
+        assert sum(stint["laps"] for stint in plan["stints"]) == 12
+
+
+async def test_strategy_is_deterministic_across_requests(api: Any, real_session: int) -> None:
+    track = await _get(api, f"/api/sessions/{real_session}")
+    path = f"/api/analysis/strategy?track_id={track['track_id']}&race_laps=10"
+    assert await _get(api, path) == await _get(api, path)

@@ -1,11 +1,11 @@
-"""Phase 2 analysis endpoints: telemetry traces, lap comparison, corners, stints.
+"""Phase 2 analysis endpoints: telemetry traces, lap comparison, corners, stints, strategy.
 
 `docs/analysis-api.md` is the frozen contract; this module is the only thing that should be
 assembling those shapes. It is deliberately thin — fetch rows, hand them to `f126.analysis`,
 serialise — because every algorithm worth testing lives in that package, where it can be
 tested against a synthetic lap with no database in sight.
 
-Read-only, like the rest of the HTTP surface: four GETs and nothing else, ever
+Read-only, like the rest of the HTTP surface: five GETs and nothing else, ever
 (`tests/test_web.py::test_no_mutating_routes` walks the route table and enforces it).
 
 Error conventions, mirroring the Phase 1 handlers:
@@ -37,6 +37,7 @@ from f126.analysis.resample import (
     trace_from_rows,
 )
 from f126.analysis.stints import build_stints
+from f126.analysis.strategy import build_strategy
 
 # Shares the Phase 1 connection semantics rather than re-implementing them: a psycopg
 # connection and a pool handle are both context managers and entering one is what returns
@@ -65,6 +66,12 @@ CarIndexQuery = Annotated[int | None, Query(ge=0, le=21)]
 RefQuery = Annotated[str, Query(pattern=r"^(best|track_best|[0-9]{1,4})$")]
 #: Which session `ref` is read from. Defaults to the subject's own session.
 RefSessionQuery = Annotated[int | None, Query(ge=1, le=10**18)]
+#: A circuit. `-1` is the recorder's "the Session packet never landed" sentinel and is
+#: refused here rather than gathering every trackless fragment ever captured; the upper
+#: bound is well past the largest track id either wire format defines.
+TrackIdQuery = Annotated[int, Query(ge=0, le=1000)]
+#: Race distance to plan for. 1 is a legal (if pointless) race; 200 is past Monaco's 78.
+RaceLapsQuery = Annotated[int | None, Query(ge=1, le=200)]
 
 #: Channels the raw telemetry endpoint emits as integers; the rest go out as floats.
 _INTEGER_CHANNELS: frozenset[str] = frozenset({"gear", "rpm", "drs_or_aero"})
@@ -193,7 +200,76 @@ def analysis_router(db_conn_factory: Callable[[], Any] | None) -> APIRouter:
 
         return await _run(db_conn_factory, work)
 
+    @router.get("/analysis/strategy", response_model=None)
+    async def strategy(
+        track_id: TrackIdQuery,
+        race_laps: RaceLapsQuery = None,
+    ) -> Any:
+        """Fuel load and pit strategy for a race at one circuit, from that circuit's own data.
+
+        Every session recorded at `track_id` is read — practice, qualifying, sprint and
+        race — and the compound models, fuel burn and pit-lane loss are measured out of
+        them. A compound nobody ran comes back `untested` with null model fields rather
+        than a default from somewhere else.
+
+        `race_laps` defaults to the most recent race at this circuit that recorded its own
+        distance. A circuit with sessions but no such race is a **422**: guessing a race
+        length would silently decide the stop count.
+        """
+
+        def work(conn: Conn) -> Any:
+            queries = _queries()
+            sessions = queries.sessions_at_track(conn, track_id)
+            if not sessions:
+                raise AnalysisError(404, "no sessions recorded at this track")
+
+            laps_wanted = race_laps
+            source = "request"
+            if laps_wanted is None:
+                latest = queries.latest_race_laps_at_track(conn, track_id)
+                if latest is None:
+                    raise AnalysisError(
+                        422,
+                        "no race at this track recorded its distance; pass race_laps=<int>",
+                    )
+                laps_wanted = int(latest["total_laps"])
+                source = f"{latest['session_type_name']} (session {latest['id']})"
+
+            ids = [int(row["id"]) for row in sessions]
+            return build_strategy(
+                track_id,
+                sessions,
+                _group(queries.player_stints_for_sessions(conn, ids)),
+                _group(queries.player_laps_for_sessions(conn, ids)),
+                _group(queries.wear_by_lap_for_sessions(conn, ids)),
+                race_laps=laps_wanted,
+                race_laps_source=source,
+                track_name=_track_name(sessions),
+            )
+
+        return await _run(db_conn_factory, work)
+
     return router
+
+
+def _group(rows: list[JsonRow]) -> dict[int, list[JsonRow]]:
+    """Split a multi-session result set by `session_id`, preserving the query's order."""
+    out: dict[int, list[JsonRow]] = {}
+    for row in rows:
+        session_id = row.get("session_id")
+        if session_id is None:
+            continue
+        out.setdefault(int(session_id), []).append(row)
+    return out
+
+
+def _track_name(sessions: list[JsonRow]) -> str | None:
+    """The circuit's name, from whichever session row carries one."""
+    for row in sessions:
+        name = row.get("track_name")
+        if name:
+            return str(name)
+    return None
 
 
 # ---- shared plumbing ----------------------------------------------------------------

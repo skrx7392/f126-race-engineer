@@ -11,10 +11,13 @@ generation per (car_index, lap_number) unless they ask for all of them.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from psycopg.rows import dict_row
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 Conn = psycopg.Connection[Any]
 JsonRow = dict[str, Any]
@@ -397,6 +400,142 @@ _PLAYER_LAP_COUNT_SQL = """
       FROM laps l JOIN sessions s ON s.id = l.session_id
      WHERE l.session_id = %s AND l.car_index = s.player_car_index
 """
+
+
+# --------------------------------------------------------------------------------------
+# Phase 2.6 strategy reads (f126.analysis.strategy)
+#
+# These are *track*-scoped rather than session-scoped: a strategy sheet is built out of the
+# whole weekend at one circuit, so each of them takes a track id or a list of session ids
+# and comes back with the player's rows across all of them in one round trip.
+#
+# "The player" is resolved from `participants.is_player`, falling back to
+# `sessions.player_car_index`. It is never assumed to be car 0 — in every real capture this
+# recorder has taken the player is car 21, and a query that assumed 0 would silently return
+# an AI driver's laps, which look entirely plausible and are entirely the wrong car.
+# --------------------------------------------------------------------------------------
+
+_PLAYER_CAR = """
+    coalesce((SELECT p.car_index FROM participants p
+               WHERE p.session_id = s.id AND p.is_player
+               ORDER BY p.car_index LIMIT 1),
+             s.player_car_index)
+"""
+
+# `s.track_id = %s` is an equality on a sentinel-bearing column: -1 means "the Session
+# packet never landed", so matching -1 to -1 would gather sessions from unrelated circuits.
+# Callers pass a real track id only; the route refuses negatives at the door.
+#
+# One row per *game* session, not per recorder segment. A pause or a process restart writes
+# a second `sessions` row for the same uid, holding the same laps and the same pit stops —
+# and a strategy built over both counts one race's fuel burn twice and reports one stop as
+# two. The representative row is picked by the same rule `_SESSION_LIST_SQL` uses: the
+# segment that knows its track and type, then the one with the most of the player's laps.
+_SESSIONS_AT_TRACK_SQL = f"""
+    WITH seg AS (
+        SELECT s.id, s.session_uid, s.segment, s.session_type, s.session_type_name,
+               s.track_id, s.track_name, s.total_laps, s.started_at_wall, s.ended_reason,
+               {_PLAYER_CAR} AS player_car_index,
+               (SELECT count(DISTINCT l.lap_number) FROM laps l
+                 WHERE l.session_id = s.id AND l.car_index = {_PLAYER_CAR})
+                   AS player_lap_count
+          FROM sessions s
+         WHERE s.track_id = %s AND s.session_uid <> '0'
+    ),
+    rep AS (
+        SELECT DISTINCT ON (session_uid) *
+          FROM seg
+         ORDER BY session_uid, (session_type > 0) DESC, player_lap_count DESC NULLS LAST,
+                  id DESC
+    )
+    SELECT * FROM rep
+     ORDER BY started_at_wall NULLS LAST, id
+     LIMIT %s
+"""
+
+_PLAYER_LAPS_FOR_SESSIONS_SQL = f"""
+    SELECT DISTINCT ON (l.session_id, l.lap_number) l.*
+      FROM laps l
+      JOIN sessions s ON s.id = l.session_id
+     WHERE l.session_id = ANY(%s) AND l.car_index = {_PLAYER_CAR}
+     ORDER BY l.session_id, l.lap_number, l.generation DESC
+"""
+
+_PLAYER_STINTS_FOR_SESSIONS_SQL = f"""
+    SELECT t.session_id, t.car_index, t.stint_no, t.compound_actual, t.compound_visual,
+           t.lap_start, t.lap_end, t.wear_at_end_json, t.end_reason
+      FROM tyre_stints t
+      JOIN sessions s ON s.id = t.session_id
+     WHERE t.session_id = ANY(%s) AND t.car_index = {_PLAYER_CAR}
+     ORDER BY t.session_id, t.stint_no
+"""
+
+# Summarised in SQL, not in Python: a race weekend holds tens of thousands of wear samples
+# and the strategy only needs one number per lap. GREATEST skips NULL corners, and the
+# outer max() collapses the 1 Hz samples within a lap to the worst reading on it — wear
+# only rises within a set, so the largest sample on a lap is that lap's end state.
+_WEAR_BY_LAP_FOR_SESSIONS_SQL = """
+    SELECT w.session_id, w.lap_number,
+           max(GREATEST(w.tyre_wear_pct[1], w.tyre_wear_pct[2],
+                        w.tyre_wear_pct[3], w.tyre_wear_pct[4])) AS max_wear_pct
+      FROM wear_samples w
+     WHERE w.session_id = ANY(%s) AND w.lap_number IS NOT NULL
+       AND w.tyre_wear_pct IS NOT NULL
+     GROUP BY w.session_id, w.lap_number
+     ORDER BY w.session_id, w.lap_number
+"""
+
+# The distance to plan for when the caller does not say: the most recent race at this
+# circuit that knows how long it was. Sprints (types 15-17 are races; the game numbers the
+# sprint among them) count — if the newest race here was a 14-lap sprint, 14 laps is the
+# honest default, and the caller can always pass `race_laps` explicitly.
+_LATEST_RACE_LAPS_SQL = """
+    SELECT s.id, s.total_laps, s.session_type, s.session_type_name
+      FROM sessions s
+     WHERE s.track_id = %s AND s.session_type BETWEEN 15 AND 17
+       AND s.total_laps IS NOT NULL AND s.total_laps > 0
+     ORDER BY s.started_at_wall DESC NULLS LAST, s.id DESC
+     LIMIT 1
+"""
+
+
+def sessions_at_track(conn: Conn, track_id: int, *, limit: int = 200) -> list[JsonRow]:
+    """Every recorded session at one circuit, oldest first, with the player's car resolved.
+
+    Bounded like every other unauthenticated read; 200 covers a season of weekends at one
+    circuit with room to spare.
+    """
+    return _fetch(conn, _SESSIONS_AT_TRACK_SQL, (int(track_id), max(1, int(limit))))
+
+
+def player_laps_for_sessions(conn: Conn, session_ids: Sequence[int]) -> list[JsonRow]:
+    """The player's laps across several sessions, newest generation of each lap only."""
+    if not session_ids:
+        return []
+    return _fetch(conn, _PLAYER_LAPS_FOR_SESSIONS_SQL, ([int(i) for i in session_ids],))
+
+
+def player_stints_for_sessions(conn: Conn, session_ids: Sequence[int]) -> list[JsonRow]:
+    """The player's recorded tyre stints across several sessions."""
+    if not session_ids:
+        return []
+    return _fetch(conn, _PLAYER_STINTS_FOR_SESSIONS_SQL, ([int(i) for i in session_ids],))
+
+
+def wear_by_lap_for_sessions(conn: Conn, session_ids: Sequence[int]) -> list[JsonRow]:
+    """Worst-wheel tyre wear per lap across several sessions (`max_wear_pct`).
+
+    `wear_samples` is a player-only table by construction, so no car filter is needed here.
+    """
+    if not session_ids:
+        return []
+    return _fetch(conn, _WEAR_BY_LAP_FOR_SESSIONS_SQL, ([int(i) for i in session_ids],))
+
+
+def latest_race_laps_at_track(conn: Conn, track_id: int) -> JsonRow | None:
+    """The most recent race at a circuit that recorded its own distance. None if there is none."""
+    rows = _fetch(conn, _LATEST_RACE_LAPS_SQL, (int(track_id),))
+    return rows[0] if rows else None
 
 
 def latest_debrief(conn: Conn, session_id: int) -> JsonRow | None:

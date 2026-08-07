@@ -8,6 +8,10 @@ analysis pages; field names are frozen, additive changes only.
 Existing (Phase 1): `GET /api/sessions?limit=`, `GET /api/sessions/{id}`,
 `GET /api/sessions/{id}/laps?car_index=`.
 
+Everything below is scoped to **the player's car**, resolved from `participants.is_player`
+and falling back to `sessions.player_car_index`. The player is *not* car 0 — in every real
+career capture this recorder has taken they are car 21, and it varies between sessions.
+
 ## `GET /api/sessions/{id}/laps/{lap}/telemetry?car_index=<player default>`
 One lap's trace for charts. Downsampling: none (rows are already 20 Hz).
 ```json
@@ -88,6 +92,83 @@ Deterministic for a given lap; tuning constants live in one module with rational
 Fit is least-squares linear over valid, non-excluded laps (excluded = in/out laps, laps with
 pit status, laps > 107% of stint median — flagged, not hidden).
 
+## `GET /api/analysis/strategy?track_id=30[&race_laps=14]`
+Pre-race fuel load and pit strategy for one circuit, computed from **that circuit's own
+recorded running and nothing else**. There is no tyre database and no per-track table of pit
+losses in this project: a compound nobody drove at this track comes back `untested` with
+every model field `null`, and a plan that would need it is not offered. A missing input is
+never a default.
+
+`race_laps` omitted defaults to the most recent race-type session (`session_type` 15–17) at
+this circuit that recorded its own `total_laps`. A circuit with sessions but no such race is
+a **422** naming `race_laps`, because guessing a race length silently decides the stop count.
+**404** when nothing at all was recorded at `track_id`; **503** if the DB is down.
+`track_id` must be ≥ 0 — `-1` is the recorder's "the Session packet never landed" sentinel,
+not a circuit.
+
+```json
+{"track_id": 30, "track_name": "Miami", "race_laps": 14,
+ "race_laps_source": "Race 2 (session 229)",   // or "request"
+ "wear_cliff_pct": 28.0,
+ "compounds": [
+   {"compound_visual": 16, "name": "Soft", "dry": true, "untested": false, "stints_seen": 2,
+    "evidence": "race",                        // "race" | "practice" | null
+    "pace": {"base_ms": 88643.2, "deg_ms_per_lap": 1162.4, "r2": 0.6924, "laps_used": 6,
+             "evidence": "race", "session_id": 229, "session_label": "Race 2 (session 229)",
+             "stint_no": 1, "lap_range": [1, 7]},
+    "wear": {"pct_per_lap": 5.87, "source": "wear_samples", "laps": 6, "evidence": "race",
+             "session_id": 229, "session_label": "Race 2 (session 229)", "stint_no": 1},
+    "max_stint_laps": 4, "projected_wear_at_max_pct": 23.5,
+    "plannable": true, "not_plannable_reason": null},
+   {"compound_visual": 18, "name": "Hard", "dry": true, "untested": true, "stints_seen": 0,
+    "evidence": null, "pace": null, "wear": null, "max_stint_laps": null,
+    "plannable": false,
+    "not_plannable_reason": "no stint on this compound was recorded this weekend"}],
+ "plans": [
+   {"rank": 1, "stops": 1, "compounds": [16, 18], "label": "Soft → Hard",
+    "stints": [{"compound_visual": 16, "name": "Soft", "lap_start": 1, "lap_end": 4,
+                "laps": 4, "projected_end_wear_pct": 23.5}, ...],
+    "total_time_ms": 1253110.0, "delta_to_best_ms": 0.0,
+    "pit_windows": [{"stop": 1, "planned_lap": 4, "earliest_lap": 2, "latest_lap": 4,
+                     "window_laps": 2}],
+    "safety_car": {"flexibility": "flexible", "note": "stop 1 can be taken anywhere ..."}}],
+ "plans_considered": 6,
+ "fuel": {"kg_per_lap": 1.064, "laps_measured": 17, "evidence": "race",
+          "session_ids": [196, 229], "race_laps": 14, "margin_laps": 0.45,
+          "slider_laps": 14.45, "recommended_kg": 15.37},
+ "pit_loss_s": 16.52,
+ "pit_loss": {"seconds": 16.52, "source": "measured", "stops_measured": 2,
+              "stops": [{"session_id": 229, "stop_after_stint": 1, "laps": [7],
+                         "loss_s": 13.17}, ...],
+              "detail": "median of 2 stop(s) measured at this circuit, ..."},
+ "sessions_used": [{"id": 229, "session_type": 16, "session_type_name": "Race 2",
+                    "evidence": "race", "started_at_wall": 1786129983.9,
+                    "contributed": ["fuel burn", "pit-lane loss", "soft pace", "soft wear"]}],
+ "omitted": {}}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `wear_cliff_pct` | Max-wheel wear treated as the performance cliff. **Telemetry percent**, which is roughly *half* what the in-game display shows; the ratio is uncalibrated and is never applied to a computed number. |
+| `compounds[].untested` | No stint on this compound at this circuit. Every model field is `null`. All three dry compounds are always listed, so an untested one is a visible fact rather than a missing row. |
+| `compounds[].evidence` | Tier of the weaker of the two models below it. `race` = session type 10–17 (the races and the sprint weekend's sessions); `practice` = types 1–9. Race trim always wins the tie-break when both exist, because practice degradation and wear run at roughly double race rate. |
+| `compounds[].pace` | The `stints` endpoint's own fit, taken from the best-evidenced stint — not recomputed. `deg_ms_per_lap_planned` appears (as `0.0`) only when the measured slope was negative and the planner clamped it. |
+| `compounds[].wear` | Worst-wheel %/lap. `source` is `wear_samples` (least-squares over the stint's own 1 Hz samples) or `stint_end_wear` (end reading ÷ laps run) when samples are missing. |
+| `compounds[].max_stint_laps` | `floor(wear_cliff_pct / wear.pct_per_lap)`, capped at `race_laps`. `null` without a wear rate. |
+| `compounds[].plannable` | Has a pace model, a wear rate, and is a dry compound. `not_plannable_reason` is populated whenever this is false. |
+| `plans` | Every legal 1- and 2-stop ordering, ranked by `total_time_ms`. Legal = at least two distinct dry compounds (FIA two-compound rule) and every stint inside its wear cap. Capped at 12 returned; `plans_considered` is the full count. Empty means no legal plan — `omitted.plans` says why. |
+| `plans[].total_time_ms` | Sum of per-lap times from the degradation fits, plus `pit_loss_s` per stop. Stint lengths are the allocation that minimises this, exactly (the objective is convex and separable). |
+| `plans[].pit_windows` | Per stop: the planned box lap and the earliest/latest lap it could be taken on while still covering the race inside every wear cap. Exact feasibility bounds, not heuristics. |
+| `plans[].safety_car` | `flexible` when some stop's window is ≥ 3 laps wide (a safety car inside it is close to a free stop), `tight` when the wear ceiling fixes when you box, `none` with no stop left. |
+| `fuel` | `kg_per_lap` is the mean of `fuel_start_kg - fuel_end_kg` over the laps the stint fit did **not** exclude — i.e. racing laps, not in/out/deleted ones. `recommended_kg = (race_laps + margin_laps) × kg_per_lap`; `slider_laps = race_laps + margin_laps`, which is the unit the game's fuel slider uses. `null` when fewer than 3 laps carried both tank readings, with the reason in `omitted.fuel`. |
+| `pit_loss` | `measured`: the pit lap's excess over the driver's own clean-lap median in the same race, median over every stop found at this circuit. `default`: a named constant, used only when the circuit has no recorded stop, and always flagged. |
+| `sessions_used` | Every session read, in start order, with `contributed` naming what each one supplied. A session read that gave nothing appears with an empty list. |
+| `omitted` | Section name → why it could not be computed. Present sections are always real numbers; a missing input never becomes a zero. |
+
+Deterministic for a given `(track_id, race_laps)` and a given database state. Sessions are
+deduplicated to one row per `session_uid` (the same rule `GET /api/sessions` uses), so a
+race split across recorder segments counts its fuel and its stops once.
+
 ## `GET /api/sessions/{id}/debrief`
 The stored post-session debrief. **404 when the session has none**, which is the ordinary
 state of a session that was just recorded rather than an error; 503 if the DB is down.
@@ -141,6 +222,12 @@ task off the capture path, skipped when the feature is unconfigured), and on dem
 - `#/corners?...` — corner table with time-loss bars + min-speed deltas; clicking a corner
   zooms the compare charts to that distance window (shared state with compare view).
 - `#/stints?...` — lap-time scatter + fitted deg lines per stint, wear-at-end chips.
+- `#/strategy?track={id}[&laps={n}]` — the pre-race sheet: fuel load in kilograms *and* in
+  slider laps, ranked plan cards (stint bars at true lap width, projected loss against the
+  best plan, pit window, safety-car note), the per-compound model table with its evidence
+  tier and untested rows, and a provenance footer naming every session it was built from.
+  Track-scoped, not session-scoped: the picker lists circuits that have sessions, and both
+  the sessions browser and the session detail page link into it by track.
 Live pit wall stays the default route (`#/` = current behavior, untouched).
 
 The session detail page also carries a collapsible **Debrief** card above the instruments,

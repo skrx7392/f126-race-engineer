@@ -166,3 +166,123 @@ Reversals welcome — flag anything and I'll adjust.
     right default for a public repo. Worth recording: that proxy mounts the OpenAI surface
     under `/api/v1`, and plain `/v1` returns 404, so the configured base URL includes the
     prefix. Cluster access for this work was strictly read-only; nothing was applied.
+
+## 2026-08-07 — Phase 2.6: pre-race strategy
+
+26. **The reported lap-context bug does not exist as described, and the real one is a
+    flashback.** The hypothesis was that `RowBuilder._player_index` is never updated from
+    `PacketHeader.player_car_index`, so `record.car_index == self._player_index` never
+    matches a real player at car 21. It *is* updated (`rows.py`, inside `feed()`), and the
+    live database agrees: sessions 196 and 229 both carry compound, fuel, tyre age and top
+    speed on all of the player's laps at `car_index = 21`. Reading the whole table, the only
+    sessions with NULL context are 4 and 44 — and both are `joined_in_progress`, where the
+    laps arrive through SessionHistory for running that happened before the recorder
+    attached and there genuinely is no fuel or top speed to attach. Two real defects were
+    found in the same code and fixed:
+    - **`_player_index` was one packet stale relative to the callbacks that read it.**
+      `StateBundle.feed()` runs `tracker.feed()` first (deliberately — lifecycle callbacks
+      must land before the packet is written out), and the tracker's lap ledger publishes
+      completed laps through `on_lap()` from *inside* that call. So `on_lap()` read an index
+      derived from the *previous* packet, which on the process's very first packet is the
+      initialisation value 0. A backfill whose raw log opens on a SessionHistory does hit
+      this. Fixed at the root: `RowBuilder.observe_header()` absorbs the header and nothing
+      else, and `StateBundle.feed()` calls it before the tracker so the index is never
+      behind its own callbacks.
+    - **A flashback left stale per-lap context, which was then written under the new
+      generation.** Exactly the bug commit `aed1599` fixed for the stint wear peak, in the
+      same file, not carried across to `_lap_context`: the fuel, top speed and ERS totals
+      accumulated since the last crossing describe running that has been undone, and the
+      re-driven lap was re-emitted carrying the abandoned timeline's numbers. Because
+      `generation` is part of the laps primary key this is a *new row*, so the writer's
+      COALESCE could not repair it. `on_generation` now clears the accumulators (cleared,
+      not re-seeded from `self._status`, whose tank is the pre-rewind reading) and the
+      rewind branch of `_on_lap_view` drops every snapshot at or after the lap being
+      re-driven. This directly protects the fuel-burn input Phase 2.6 depends on.
+    Regression tests cover all three: a two-car field driven end to end with
+    `player_car_index = 21` (the player's laps carry context, car 0's carry none), a capture
+    that opens on a SessionHistory, and a flashback whose re-driven lap must report the fuel
+    and top speed it was actually re-driven on.
+
+27. **The strategy engine measures everything or omits it — there is no tyre database.**
+    `analysis/strategy.py` is pure (rows in, dict out, like `stints.py`) and every number in
+    its output was measured at the circuit being planned for. A compound with no stint comes
+    back `untested: true` with null model fields and is excluded from plan enumeration; a
+    compound with a stint too short to fit a line through says so in
+    `not_plannable_reason`. Validated read-only against the live database: Jeddah softs
+    6.11 %/lap, Miami sprint softs 5.87 %/lap, Miami hards 2.88 %/lap, Miami fuel 1.064
+    kg/lap, Jeddah fuel 1.26 kg/lap — all inside the bands measured by hand from the same
+    races. Miami honestly produces **no plan at all** (only the soft ran long enough to
+    model, and the two-compound rule needs two), which is the correct answer for that
+    weekend and is stated in `omitted.plans` rather than papered over.
+
+28. **Degradation is imported from `stints.py`, not re-derived.** The strategy calls
+    `build_stints()` per session and reads its `fit`, so the slope on the strategy page and
+    the slope on the stints page are the same number computed once, with the same 107 %
+    outlier rule and the same four-lap floor. The one rule both modules needed —
+    which laps of a stint are shared with a pit lane — was extracted into
+    `stints.pit_flags()` rather than copied, because the two disagreeing about it would put
+    the pit lap's wear into a per-lap rate.
+
+29. **`WEAR_CLIFF_PCT = 28.0`, from the telemetry and not from the game's display.** The
+    softs collapsed at 28–31 % max-wheel wear in two races at two circuits; 28 is the bottom
+    of that band, so a stint planned to it stops *before* the collapse. The in-game OSD
+    reads roughly double the telemetry figure, and that ratio is an eyeball comparison, not
+    a calibration — so it is never applied to a computed number. The UI shows it once, in
+    parentheses, smaller, always beside the real figure (`analysis-format.ts::inGameWear`,
+    `IN_GAME_WEAR_FACTOR = 2`).
+
+30. **A negative fitted degradation slope is clamped to zero for planning only.** Short
+    stints on a light car fit negative sometimes — fuel burning off and the track rubbering
+    in showing through — and projecting that forward recommends running one set to the flag.
+    The measured slope is reported unchanged in `pace.deg_ms_per_lap`; the clamp is a
+    separate, named field (`deg_ms_per_lap_planned`) so the two cannot be confused.
+
+31. **Stint lengths are allocated exactly, not heuristically.** A stint of `L` laps costs
+    `L·base + deg·L(L-1)/2`, which is convex in `L` for a non-negative slope, so handing
+    laps out one at a time to whichever stint's *next* lap is cheapest is the exact optimum
+    for a fixed total — and deterministic, since ties go to the earlier stint. Pit windows
+    are exact feasibility bounds from the wear caps, not a rule of thumb.
+
+32. **Pit loss is measured from the circuit's own stop, and flagged when it is not.** A stop
+    is the lap two consecutive stints share; the loss is that lap's excess over the driver's
+    own clean-lap median in the same race, which nets out the car, the fuel load and the
+    circuit in one subtraction. Measured 16.4 s at Jeddah and 16.5 s at Miami. The fallback
+    `DEFAULT_PIT_LOSS_S = 21.0` is used only when the circuit has no recorded stop and
+    always arrives with `source: "default"`, because a plan's stop count is decided by this
+    number.
+
+33. **`FUEL_MARGIN_LAPS = 0.45`, validated against the tank the race was actually run on.**
+    The Miami sprint was run with 15.0 kg for 14 laps at a measured 1.04 kg/lap — 14.42 laps
+    of fuel. This rule asks for 14.45. Both units are emitted and shown, because the game
+    asks for laps on the slider and kilograms on the setup screen; converting one into the
+    other for the driver is the sort of arithmetic that gets done wrong under pressure.
+
+34. **Race-trim evidence is defined as session types 10–17, as specified, with a caveat
+    recorded here.** 15–17 are the races and this recorder saw a real Miami sprint arrive as
+    type 16; 10–14 are the sprint weekend's shootout sessions, which are qualifying-shaped.
+    A one-shot shootout contributes at most one lap, which cannot produce a fit and loses
+    every tie-break to a longer run, so including them costs nothing in practice — but a
+    sprint-weekend fuel figure can pick up a shootout lap, which is why `fuel.session_ids`
+    is in the payload. Tightening this to `>= 15` plus an explicit sprint detector is the
+    obvious follow-up if it ever matters.
+
+35. **`sessions_at_track` deduplicates to one row per `session_uid`.** Found while
+    validating: a pause or a process restart writes a second `sessions` row holding the same
+    laps and the same stops, and the first version of this counted Jeddah's race fuel twice
+    and reported its one pit stop as two. It now picks the representative segment by the
+    same rule `_SESSION_LIST_SQL` already uses.
+
+36. **The strategy route is track-scoped and stays read-only.** `GET
+    /api/analysis/strategy?track_id=&race_laps=` — a fifth GET, no mutating route, and
+    `track_id = -1` (the "no Session packet" sentinel) is refused at the door rather than
+    gathering every trackless fragment ever captured. `race_laps` omitted defaults to the
+    newest race at the circuit that recorded its own distance; a circuit with no such race
+    is a 422 naming the parameter, because guessing a race length silently decides the stop
+    count for the driver.
+
+37. **The frontend mock re-implements the engine rather than shipping a payload blob.**
+    Same rule `mock.ts` and the rest of `analysis-mock.ts` already follow: the fixture caps
+    stints at the wear cliff, enumerates the legal orderings and allocates laps with the
+    same greedy step, so `npm run dev:mock` exercises a plan whose stint lengths and pit
+    windows are internally consistent, and the untested-compound and no-legal-plan paths are
+    reachable by changing inputs instead of by hand-writing a second payload.

@@ -685,6 +685,139 @@ def test_lap_row_carries_player_context_and_is_corrected_by_history() -> None:
     assert laps[1]["fuel_start_kg"] == 50.0  # context preserved across the correction
 
 
+def test_lap_context_follows_a_non_zero_player_car_index() -> None:
+    """End to end with the player at car 21, which is where a real career session puts them.
+
+    `RowBuilder._player_index` starts at 0 and only the packet header says otherwise, so
+    every path that decides "is this lap ours?" has to be reading a *current* index. This
+    walks a two-car field through the whole state layer: the player's laps must carry the
+    compound, fuel and top speed, and car 0 — the index the field initialises to, and the
+    one a broken attribution would hand the context to — must carry none of it.
+    """
+    player = 21
+    sink = Sink()
+    bundle = build_state(cfg(), emit_row=sink.emit)
+    sim = Sim(uid=1, player=player)
+    bundle.feed(sim.packet(PacketId.SESSION, sessionview(), dt=0.0))
+    bundle.feed(sim.packet(PacketId.CAR_STATUS, status(fuel=50.0, compound=16, age=2)))
+    bundle.feed(
+        sim.packet(
+            PacketId.LAP_DATA,
+            lapview(car(idx=player, lap=1, s1=21000, s2=35000), car(idx=0, lap=1)),
+        )
+    )
+    bundle.feed(sim.packet(PacketId.CAR_TELEMETRY, telemetry(speed=331.0)))
+    bundle.feed(sim.packet(PacketId.CAR_STATUS, status(fuel=48.6, compound=16, age=2)))
+    bundle.feed(
+        sim.packet(
+            PacketId.LAP_DATA,
+            lapview(car(idx=player, lap=2, last=91000), car(idx=0, lap=2, last=95000)),
+        )
+    )
+
+    by_car = {row["car_index"]: row for row in sink.table("laps")}
+    assert set(by_car) == {0, player}
+
+    mine = by_car[player]
+    assert mine["lap_time_ms"] == 91000
+    assert mine["compound_actual"] == 16
+    assert mine["compound_visual"] == 16
+    assert mine["tyre_age_laps"] == 2
+    assert mine["fuel_start_kg"] == 50.0
+    assert mine["fuel_end_kg"] == 48.6
+    assert mine["top_speed_kmh"] == 331.0
+
+    # The opponent's row is a real lap with no per-lap context: the game broadcasts none
+    # of that for other cars, and inventing it (or handing it ours) is the failure mode.
+    theirs = by_car[0]
+    assert theirs["lap_time_ms"] == 95000
+    for field in (
+        "compound_actual",
+        "compound_visual",
+        "tyre_age_laps",
+        "fuel_start_kg",
+        "fuel_end_kg",
+        "top_speed_kmh",
+    ):
+        assert theirs[field] is None, field
+
+    # ...and the session row agrees about who we are, so a reader can find those laps.
+    assert sink.table("sessions")[-1]["player_car_index"] == player
+    assert sink.table("tyre_stints")[-1]["car_index"] == player
+
+
+def test_player_index_is_known_before_the_trackers_lap_callback_fires() -> None:
+    """The ledger publishes laps from inside `tracker.feed()`, which runs first.
+
+    A capture that opens on a SessionHistory packet — a backfill of a raw log that starts
+    mid-session does exactly this — fires `on_lap` for the player on the very first packet
+    the process ever sees. If the row builder only learned the player index from its own
+    `feed()`, that lap was attributed to car 0.
+    """
+    sink = Sink()
+    bundle = build_state(cfg(), emit_row=sink.emit)
+    sim = Sim(uid=1, player=21)
+    bundle.feed(
+        sim.packet(
+            PacketId.SESSION_HISTORY,
+            HistoryView(
+                car_index=21,
+                num_laps=1,
+                best_lap_number=1,
+                laps=[HistoryLap(1, 91000, 21000, 35000, 35000, True)],
+            ),
+            dt=0.0,
+        )
+    )
+    assert bundle.rows is not None
+    assert bundle.rows._player_index == 21
+    assert [row["car_index"] for row in sink.table("laps")] == [21]
+
+
+def test_flashback_does_not_carry_the_abandoned_laps_context_forward() -> None:
+    """A re-driven lap must be written with the fuel and top speed it was re-driven on.
+
+    The same argument the stint wear peak already makes: a flashback un-drives running, so
+    everything accumulated since the last crossing is counterfactual. The lap is re-emitted
+    under a new generation — a new primary key, so the writer's COALESCE cannot repair it —
+    and without this it carried generation 0's numbers.
+    """
+    player = 21
+    sink = Sink()
+    bundle = build_state(cfg(), emit_row=sink.emit)
+    sim = Sim(uid=1, player=player)
+    bundle.feed(sim.packet(PacketId.SESSION, sessionview(), dt=0.0))
+    bundle.feed(sim.packet(PacketId.CAR_STATUS, status(fuel=50.0)))
+    bundle.feed(sim.packet(PacketId.LAP_DATA, lapview(car(idx=player, lap=1))))
+    bundle.feed(sim.packet(PacketId.CAR_TELEMETRY, telemetry(speed=340.0)))
+    bundle.feed(sim.packet(PacketId.CAR_STATUS, status(fuel=48.0)))
+    bundle.feed(sim.packet(PacketId.LAP_DATA, lapview(car(idx=player, lap=2, last=91000))))
+
+    # Flashback into lap 1, then drive it again more slowly and with less use of the tank.
+    bundle.feed(
+        sim.packet(
+            PacketId.LAP_DATA,
+            lapview(car(idx=player, lap=1)),
+            t=sim.t - 60.0,
+            frame=sim.frame - 1200,
+        )
+    )
+    bundle.feed(sim.packet(PacketId.CAR_STATUS, status(fuel=49.0)))
+    bundle.feed(sim.packet(PacketId.CAR_TELEMETRY, telemetry(speed=310.0)))
+    bundle.feed(sim.packet(PacketId.CAR_STATUS, status(fuel=47.4)))
+    bundle.feed(sim.packet(PacketId.LAP_DATA, lapview(car(idx=player, lap=2, last=92500))))
+
+    laps = sink.table("laps")
+    assert [(row["lap_number"], row["generation"]) for row in laps] == [(1, 0), (1, 1)]
+    assert laps[0]["top_speed_kmh"] == 340.0
+    assert laps[0]["fuel_start_kg"] == 50.0
+    redriven = laps[1]
+    assert redriven["lap_time_ms"] == 92500
+    assert redriven["top_speed_kmh"] == 310.0
+    assert redriven["fuel_start_kg"] == 49.0
+    assert redriven["fuel_end_kg"] == 47.4
+
+
 def test_tyre_stints_open_and_close_on_compound_change() -> None:
     sink = Sink()
     bundle = build_state(cfg(), emit_row=sink.emit)

@@ -231,6 +231,165 @@ export interface StintsResponse {
   stints: Stint[];
 }
 
+// ── Phase 2.6: strategy ──────────────────────────────────────────────────────
+
+/**
+ * Which kind of running a number was measured in.
+ *
+ * `race` beats `practice` and the difference is not cosmetic: practice is push laps on new
+ * tyres with a light car, and its degradation and wear come out at roughly twice race trim.
+ * The tier travels with every model so a practice-derived number can be read as one.
+ */
+export type EvidenceTier = 'race' | 'practice';
+
+/** Where a wear rate came from. Samples beat the stint's end reading. */
+export type WearSource = 'wear_samples' | 'stint_end_wear';
+
+/** One compound's lap-time model: the `stints` fit, with the stint it was read from. */
+export interface StrategyPace {
+  base_ms: number | null;
+  deg_ms_per_lap: number | null;
+  /**
+   * Present only when the measured slope was negative and the planner clamped it to zero.
+   * A set does not get quicker with age; that is fuel and track evolution showing through
+   * a short stint, and projecting it forward would recommend running to the flag.
+   */
+  deg_ms_per_lap_planned?: number;
+  r2: number | null;
+  laps_used: number;
+  evidence: EvidenceTier | null;
+  session_id: number;
+  session_label: string;
+  stint_no: number | null;
+  /** `[lap_start, lap_end]` of the stint this was fitted over. */
+  lap_range: Array<number | null>;
+}
+
+/** One compound's wear rate, in telemetry percent of the worst wheel per lap. */
+export interface StrategyWear {
+  pct_per_lap: number | null;
+  source: WearSource | null;
+  laps: number;
+  evidence: EvidenceTier | null;
+  session_id: number;
+  session_label: string;
+  stint_no: number | null;
+}
+
+export interface StrategyCompound {
+  compound_visual: number;
+  name: string;
+  /** False for intermediates and wets, which are never planned with. */
+  dry: boolean;
+  /** Nothing at this circuit ran this compound. Every model field is null. */
+  untested: boolean;
+  stints_seen: number;
+  evidence: EvidenceTier | null;
+  pace: StrategyPace | null;
+  wear: StrategyWear | null;
+  /** Laps before projected wear reaches the cliff. Null when the wear rate is unknown. */
+  max_stint_laps: number | null;
+  projected_wear_at_max_pct?: number;
+  plannable: boolean;
+  /** Present whenever `plannable` is false, in the sheet's own words. */
+  not_plannable_reason: string | null;
+}
+
+export interface StrategyPlanStint {
+  compound_visual: number;
+  name: string;
+  lap_start: number;
+  lap_end: number;
+  laps: number;
+  projected_end_wear_pct: number | null;
+}
+
+/** Where a stop can be taken and still finish the race inside the wear ceiling. */
+export interface StrategyPitWindow {
+  stop: number;
+  planned_lap: number;
+  earliest_lap: number;
+  latest_lap: number;
+  window_laps: number;
+}
+
+export interface StrategySafetyCar {
+  flexibility: 'flexible' | 'tight' | 'none';
+  note: string;
+}
+
+export interface StrategyPlan {
+  rank: number;
+  stops: number;
+  compounds: number[];
+  label: string;
+  stints: StrategyPlanStint[];
+  total_time_ms: number;
+  /** Projected loss against the best-ranked plan. Zero for rank 1, never negative. */
+  delta_to_best_ms: number;
+  pit_windows: StrategyPitWindow[];
+  safety_car: StrategySafetyCar;
+}
+
+export interface StrategyFuel {
+  kg_per_lap: number;
+  laps_measured: number;
+  evidence: EvidenceTier;
+  session_ids: number[];
+  race_laps: number;
+  margin_laps: number;
+  /** Laps of fuel to load: race distance plus the margin. */
+  slider_laps: number;
+  recommended_kg: number;
+}
+
+export interface StrategyPitStop {
+  session_id: number;
+  stop_after_stint: number;
+  laps: number[];
+  loss_s: number;
+}
+
+export interface StrategyPitLoss {
+  seconds: number;
+  /** `measured` from this circuit's own stop; `default` from a named constant. */
+  source: 'measured' | 'default';
+  stops_measured: number;
+  stops: StrategyPitStop[];
+  detail: string;
+}
+
+export interface StrategySessionUsed {
+  id: number;
+  session_type: number | null;
+  session_type_name: string | null;
+  evidence: EvidenceTier | null;
+  started_at_wall: number | null;
+  /** What this session contributed, e.g. `["fuel burn", "soft pace"]`. */
+  contributed: string[];
+}
+
+/** `GET /api/analysis/strategy`. */
+export interface StrategyResponse {
+  track_id: number;
+  track_name: string | null;
+  race_laps: number;
+  /** How `race_laps` was arrived at: `"request"`, or the session that named it. */
+  race_laps_source: string;
+  wear_cliff_pct: number;
+  compounds: StrategyCompound[];
+  /** Ranked fastest first. Empty when no legal plan exists; `omitted.plans` says why. */
+  plans: StrategyPlan[];
+  plans_considered: number;
+  /** Null when the weekend recorded no usable fuel data; `omitted.fuel` says so. */
+  fuel: StrategyFuel | null;
+  pit_loss_s: number;
+  pit_loss: StrategyPitLoss;
+  sessions_used: StrategySessionUsed[];
+  /** Section name -> why it could not be computed. A missing input never becomes a zero. */
+  omitted: Record<string, string>;
+}
+
 /**
  * `GET /api/sessions/{id}/debrief` — the post-session note. **404 when none exists**, which
  * is the normal state of a session that was just recorded, not a failure.
@@ -396,6 +555,21 @@ export const fetchCorners = (
 
 export const fetchStints = (sessionId: number, signal?: AbortSignal): Promise<StintsResponse> =>
   apiGet<StintsResponse>(`/api/analysis/stints${q({ session_id: sessionId })}`, signal);
+
+/**
+ * The strategy sheet for one circuit. `raceLaps` omitted lets the backend default to the
+ * most recent race there; a circuit with no such race answers 422, which is a real answer
+ * ("tell me how long the race is") and reaches the page as an `invalid` ApiError.
+ */
+export const fetchStrategy = (
+  trackId: number,
+  raceLaps?: number | null,
+  signal?: AbortSignal
+): Promise<StrategyResponse> =>
+  apiGet<StrategyResponse>(
+    `/api/analysis/strategy${q({ track_id: trackId, race_laps: raceLaps })}`,
+    signal
+  );
 
 /**
  * The stored debrief, or `null` when the session has none.
