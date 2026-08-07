@@ -20,6 +20,16 @@
    * Wear is telemetry percent throughout. The in-game display reads roughly double, so the
    * conversion is offered once, as an approximation, clearly labelled — never baked into a
    * number the model uses.
+   *
+   * Two claims on this page are weaker than the rest and are marked as such rather than
+   * softened. A **heuristically ranked** plan set has no projected times at all — it was
+   * ordered by a rule because nothing was driven long enough to model — so the badge says so
+   * and the time columns hold an em-dash instead of a number. A **derived** degradation
+   * slope was assembled from another stint's wear-to-time coefficient and this compound's
+   * own wear rate, so it carries a marker of its own next to the figure. Both are real
+   * answers; neither is a measurement of the thing it sits beside, and a page that let them
+   * look identical to a fitted number would be the sort of quiet lie this app exists to
+   * avoid.
    */
   import {
     fetchSessions,
@@ -158,8 +168,19 @@
 
   /** The plan's own headline: how much it costs against the best one. */
   function planDelta(plan: StrategyPlan): string {
+    if (plan.delta_to_best_ms == null) return DASH;
     return plan.rank === 1 ? 'fastest' : `${formatSecondsDelta(plan.delta_to_best_ms)} s`;
   }
+
+  /**
+   * The badge over the plan list. Two words for what kind of ordering this is, because
+   * "rank 1" means something completely different in the two cases: fastest, or merely
+   * first under a rule.
+   */
+  const RANKING_BADGE: Record<string, string> = {
+    time: 'ranked on pace models',
+    heuristic: 'ranked by rule — no pace model yet; times not projected'
+  };
 </script>
 
 <section class="analysis-page" data-page="strategy">
@@ -283,6 +304,15 @@
             {formatNumber(data.pit_loss_s, 1)} s
             <span class="tier tier-{data.pit_loss.source}">{data.pit_loss.source}</span>
           </span>
+          {#if data.plans_ranking}
+            <span
+              class="tier tier-ranking-{data.plans_ranking}"
+              data-testid="plans-ranking"
+              data-ranking={data.plans_ranking}
+            >
+              {RANKING_BADGE[data.plans_ranking]}
+            </span>
+          {/if}
         </h2>
 
         {#if data.plans.length === 0}
@@ -290,6 +320,11 @@
             <p class="detail">{omission(data, 'plans') ?? 'No legal plan for this race length.'}</p>
           </div>
         {:else}
+          {#if data.plans_ranking_note}
+            <p class="hint ranking-note" data-testid="plans-ranking-note">
+              {data.plans_ranking_note}
+            </p>
+          {/if}
           <div class="plans">
             {#each data.plans as plan (plan.rank)}
               <article class="panel plan" class:best={plan.rank === 1} data-plan={plan.rank}>
@@ -299,7 +334,15 @@
                   <span class="chip-plain">
                     <span class="k">Stops</span>{plan.stops}
                   </span>
-                  <span class="chip-plain delta" class:is-best={plan.rank === 1}>
+                  <!--
+                    A heuristically ranked plan has no time to show and does not borrow one:
+                    both chips fall back to the em-dash the rest of the app uses for "not
+                    known", so a feasible plan never reads as a timed one.
+                  -->
+                  <span
+                    class="chip-plain delta"
+                    class:is-best={plan.rank === 1 && plan.delta_to_best_ms != null}
+                  >
                     <span class="k">vs best</span>
                     <span class="clock">{planDelta(plan)}</span>
                   </span>
@@ -411,7 +454,28 @@
                         <span class="tier tier-{row.evidence}">{row.evidence}</span>
                       {/if}
                     </td>
-                    <td class="num clock">{formatDegradation(row.pace?.deg_ms_per_lap)}</td>
+                    <!--
+                      Degradation, with its grade attached. A fitted slope is bare, because
+                      it is the ordinary case. A derived one is marked, because it was never
+                      measured on this tyre: it is this compound's wear rate times the
+                      circuit's wear-to-time coefficient, and the title says which stint
+                      supplied that. Nothing at all is the em-dash, with the reason in the
+                      last column.
+                    -->
+                    <td class="num clock">
+                      {formatDegradation(row.pace?.deg_ms_per_lap)}
+                      {#if row.pace?.source === 'derived' && row.pace.derived_from}
+                        <span
+                          class="tier tier-derived"
+                          data-testid="derived-{row.compound_visual}"
+                          title="{formatNumber(row.pace.derived_from.ms_per_wear_pct, 0)} ms per % of wear, measured on the {row.pace.derived_from
+                            .calibration.name} stint in {row.pace.derived_from.calibration
+                            .session_label}, × {formatPercent(
+                            row.pace.derived_from.wear_pct_per_lap
+                          )}/lap of wear measured on this compound">derived</span
+                        >
+                      {/if}
+                    </td>
                     <td class="num clock conf-{confidence}">{formatR2(row.pace?.r2)}</td>
                     <td class="num gauge">
                       {formatPercent(row.wear?.pct_per_lap)}
@@ -425,7 +489,18 @@
                         <span class="omitted">{row.not_plannable_reason}</span>
                       {:else}
                         {row.pace?.session_label ?? row.wear?.session_label ?? DASH}
-                        {#if row.pace}
+                        {#if row.pace?.source === 'derived' && row.pace.derived_from}
+                          <span class="label"
+                            >calibration: {row.pace.derived_from.calibration.name} stint {row.pace
+                              .derived_from.calibration.stint_no} · laps {row.pace.derived_from
+                              .calibration.lap_range[0]}–{row.pace.derived_from.calibration
+                              .lap_range[1]} · {row.pace.derived_from.calibration.laps_used} used</span
+                          >
+                          <span class="label"
+                            >base: median of {row.pace.base_source?.laps} clean lap(s) on this
+                            compound here</span
+                          >
+                        {:else if row.pace}
                           <span class="label"
                             >stint {row.pace.stint_no} · laps {row.pace.lap_range[0]}–{row.pace
                               .lap_range[1]} · {row.pace.laps_used} used</span
@@ -462,6 +537,30 @@
             {/each}
           </ul>
           <p class="hint">{data.pit_loss.detail}</p>
+          <!--
+            The shared coefficient gets its own line, and its assumption with it. It is the
+            one number here that is lent between compounds, so the sentence that says why
+            that is allowed travels with it rather than living only in the source.
+          -->
+          {#if data.wear_calibration}
+            <p class="hint" data-testid="wear-calibration">
+              Wear-to-time: {formatNumber(data.wear_calibration.ms_per_wear_pct, 0)} ms per % of
+              wear, from the {data.wear_calibration.name} stint in
+              {data.wear_calibration.session_label}
+              ({data.wear_calibration.laps_used} laps over
+              {formatPercent(data.wear_calibration.wear_span_pct)} of wear, r² {formatR2(
+                data.wear_calibration.r2
+              )}).
+              {#if data.wear_calibration.ms_per_wear_pct_planned != null}
+                Measured negative, so planning uses zero.
+              {/if}
+              {data.wear_calibration.assumption}
+            </p>
+          {:else if omission(data, 'wear_calibration')}
+            <p class="hint omitted" data-testid="wear-calibration-omitted">
+              {omission(data, 'wear_calibration')}
+            </p>
+          {/if}
         </footer>
       {/snippet}
     </StatePanel>
@@ -608,6 +707,44 @@
   .tier-untested {
     color: var(--ink-3);
     border-style: dashed;
+  }
+
+  /*
+   * The two "this is weaker evidence" markers. Both are amber for the same reason the
+   * practice tier is — usable, not measured here — and both carry their own word, so the
+   * distinction survives being read in greyscale or by a screen reader.
+   */
+  .tier-derived,
+  .tier-ranking-heuristic {
+    color: var(--amber);
+    border-color: color-mix(in srgb, var(--amber) 45%, var(--line));
+  }
+
+  .tier-derived {
+    margin-inline-start: 0.3rem;
+    letter-spacing: 0.04em;
+  }
+
+  .tier-ranking-time {
+    color: var(--green);
+    border-color: color-mix(in srgb, var(--green) 45%, var(--line));
+  }
+
+  /* Sentences, not labels: these two badges say a whole thing and read better in mixed case. */
+  .tier-ranking-time,
+  .tier-ranking-heuristic {
+    text-transform: none;
+    letter-spacing: 0.01em;
+    font-weight: 600;
+    font-size: 0.66rem;
+    white-space: normal;
+  }
+
+  /* The ranking rule spelled out, once, under the badge that abbreviates it. */
+  .ranking-note {
+    max-width: 62ch;
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   /* The in-game conversion. Always parenthesised, always smaller, never a bare number. */

@@ -1048,6 +1048,391 @@ def test_strategy_is_deterministic_and_json_ready() -> None:
     assert json.loads(json.dumps(first)) == first
 
 
+# ---- feasibility plans, and degradation derived from wear -----------------------------------
+#
+# The weekend this recorder actually sees is not a race: it is a practice session driven two
+# laps at a time, which can never fit a degradation line (four clean laps) and therefore used
+# to leave the strategy page empty until a race had already been run. These fixtures are that
+# weekend — three sets, an out-lap, two flyers and an in-lap on each — plus the one long run
+# that changes everything, because a single stint anywhere at the circuit calibrates lap time
+# against wear and lends a slope to all three compounds.
+
+
+def practice_only_weekend() -> (
+    tuple[list[dict[str, Any]], dict[int, Any], dict[int, Any], dict[int, Any]]
+):
+    """One practice session, three sets, two measurable laps on each. Montreal P1's shape.
+
+    The stints share their boundary laps the way the recorder writes them: the lap the car
+    came in on is the last lap of one stint and the first of the next, so it is an in-lap and
+    an out-lap at once and neither stint may measure anything over it.
+    """
+    sessions = [strategy_session(41, 1, name="Practice 1")]
+    laps = race_laps_rows(
+        [
+            (1, 16, 0, 92_400, 0.0),
+            (2, 16, 1, 92_500, 0.0),
+            (3, 16, 2, 110_200, 0.0),  # box: in-lap of the softs, out-lap of the mediums
+            (4, 17, 1, 93_100, 0.0),
+            (5, 17, 2, 93_200, 0.0),
+            (6, 17, 3, 110_400, 0.0),  # box again
+            (7, 18, 1, 93_800, 0.0),
+            (8, 18, 2, 93_900, 0.0),
+        ]
+    )
+    stints = {
+        41: [
+            {"session_id": 41, "car_index": 21, "stint_no": 1, "compound_visual": 16,
+             "lap_start": 1, "lap_end": 3,
+             "wear_at_end_json": {"tyre_wear_pct": [15.0, 14, 12, 13]}},
+            {"session_id": 41, "car_index": 21, "stint_no": 2, "compound_visual": 17,
+             "lap_start": 3, "lap_end": 6,
+             "wear_at_end_json": {"tyre_wear_pct": [10.5, 10, 9, 9]}},
+            {"session_id": 41, "car_index": 21, "stint_no": 3, "compound_visual": 18,
+             "lap_start": 6, "lap_end": 8,
+             "wear_at_end_json": {"tyre_wear_pct": [5.0, 4.8, 4.2, 4.4]}},
+        ]
+    }
+    # 5.0 %/lap on the softs, 3.5 on the mediums, 2.5 on the hards — each set's own count,
+    # restarting when it goes on the car.
+    wear = {
+        41: wear_rows(
+            41,
+            {1: 5.0, 2: 10.0, 3: 15.0, 4: 3.5, 5: 7.0, 6: 10.5, 7: 2.5, 8: 5.0},
+        )
+    }
+    return sessions, stints, {41: laps}, wear
+
+
+def add_long_run(
+    sessions: list[dict[str, Any]],
+    stints: dict[int, Any],
+    laps: dict[int, Any],
+    wear: dict[int, Any],
+    *,
+    session_id: int = 42,
+    compound: int = 17,
+    ms_per_lap: int = 300,
+    base_ms: int = 92_000,
+    wear_per_lap: float = 3.5,
+    session_type: int = 15,
+    name: str = "Race",
+) -> None:
+    """Bolt a six-lap stint onto a weekend: the one run that can calibrate wear against time."""
+    sessions.append(
+        strategy_session(
+            session_id, session_type, name=name, total_laps=14, started=1_786_200_000.0
+        )
+    )
+    stints[session_id] = [
+        {"session_id": session_id, "car_index": 21, "stint_no": 1, "compound_visual": compound,
+         "lap_start": 1, "lap_end": 6,
+         "wear_at_end_json": {"tyre_wear_pct": [wear_per_lap * 6, 19, 17, 16]}}
+    ]
+    laps[session_id] = race_laps_rows(
+        [(lap, compound, lap - 1, base_ms + (lap - 1) * ms_per_lap, 0.0) for lap in range(1, 7)]
+    )
+    wear[session_id] = wear_rows(session_id, {lap: wear_per_lap * lap for lap in range(1, 7)})
+
+
+def test_a_practice_only_weekend_still_gets_plans_ranked_by_a_stated_rule() -> None:
+    """Two laps a set is a wear rate, and a wear rate is enough to know a plan *finishes*."""
+    sessions, stints, laps, wear = practice_only_weekend()
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+
+    by_compound = {c["compound_visual"]: c for c in payload["compounds"]}
+    for compound, rate in ((16, 5.0), (17, 3.5), (18, 2.5)):
+        row = by_compound[compound]
+        assert row["wear"]["pct_per_lap"] == pytest.approx(rate, abs=0.01)
+        assert row["pace"] is None, "two laps cannot fit a degradation line"
+        assert row["feasible"] is True
+        assert row["plannable"] is False
+        assert "feasibility plans" in row["not_plannable_reason"]
+
+    assert payload["plans"], "a weekend with three wear rates has feasible plans"
+    assert payload["plans_ranking"] == "heuristic"
+    assert "ranked by rule" in payload["plans_ranking_note"]
+    assert "plans" not in payload["omitted"]
+    # Nothing ran long enough to calibrate one, and the sheet says so rather than going quiet.
+    assert payload["wear_calibration"] is None
+    assert "wear_calibration" in payload["omitted"]
+
+
+def test_a_heuristic_plan_never_projects_a_time_it_cannot_measure() -> None:
+    sessions, stints, laps, wear = practice_only_weekend()
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+    for plan in payload["plans"]:
+        assert plan["total_time_ms"] is None
+        assert plan["delta_to_best_ms"] is None
+        # Everything the wear rates *do* support is still real.
+        assert sum(stint["laps"] for stint in plan["stints"]) == 14
+        assert len(plan["pit_windows"]) == plan["stops"]
+        for stint in plan["stints"]:
+            assert stint["projected_end_wear_pct"] <= strategy_mod.WEAR_CLIFF_PCT
+        for window in plan["pit_windows"]:
+            assert window["earliest_lap"] <= window["planned_lap"] <= window["latest_lap"]
+
+
+def test_the_heuristic_is_fewest_stops_then_the_softer_compound_earlier() -> None:
+    sessions, stints, laps, wear = practice_only_weekend()
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+    ordering = [(plan["stops"], plan["compounds"]) for plan in payload["plans"]]
+    assert ordering == sorted(ordering)
+    # Soft → Hard is the only one-stopper that starts on the softest compound and still
+    # reaches the flag (softs last 5 laps, hards 11), so it is what the rule puts first.
+    assert payload["plans"][0]["stops"] == 1
+    assert payload["plans"][0]["compounds"] == [16, 18]
+    assert [plan["rank"] for plan in payload["plans"]] == list(
+        range(1, len(payload["plans"]) + 1)
+    )
+
+
+def test_one_long_run_calibrates_wear_against_time_for_the_whole_circuit() -> None:
+    """The headline of this feature: a six-lap medium stint gives the softs and the hards a
+    degradation slope they never drove for."""
+    sessions, stints, laps, wear = practice_only_weekend()
+    add_long_run(sessions, stints, laps, wear)
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+
+    calibration = payload["wear_calibration"]
+    # 300 ms a lap over 3.5 % of wear a lap is 85.7 ms per percent.
+    assert calibration["ms_per_wear_pct"] == pytest.approx(85.7, abs=0.5)
+    assert calibration["compound_visual"] == 17
+    assert calibration["session_id"] == 42
+    assert calibration["laps_used"] == 6
+    assert calibration["evidence"] == "race"
+    assert "assumption" in calibration
+
+    by_compound = {c["compound_visual"]: c for c in payload["compounds"]}
+    soft, hard = by_compound[16], by_compound[18]
+    assert soft["pace"]["source"] == "derived"
+    assert soft["pace"]["deg_ms_per_lap"] == pytest.approx(85.7 * 5.0, abs=3.0)
+    assert hard["pace"]["deg_ms_per_lap"] == pytest.approx(85.7 * 2.5, abs=3.0)
+    # A derived slope has no r² of its own: it was never fitted to these laps.
+    assert soft["pace"]["r2"] is None
+    # Base pace is the middle of what the compound actually did here, and says so.
+    assert soft["pace"]["base_ms"] == pytest.approx(92_450, abs=1.0)
+    assert soft["pace"]["base_source"]["source"] == "median_clean_laps"
+    assert soft["pace"]["base_source"]["session_ids"] == [41]
+
+    assert soft["plannable"] is True
+    assert hard["plannable"] is True
+    assert payload["plans_ranking"] == "time"
+    assert all(plan["total_time_ms"] is not None for plan in payload["plans"])
+    assert "wear_calibration" not in payload["omitted"]
+
+
+def test_a_derived_slope_names_both_the_stints_it_was_assembled_from() -> None:
+    sessions, stints, laps, wear = practice_only_weekend()
+    add_long_run(sessions, stints, laps, wear)
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+    soft = next(c for c in payload["compounds"] if c["compound_visual"] == 16)
+    provenance = soft["pace"]["derived_from"]
+
+    # The slope's parent: the race stint the coefficient was measured on.
+    assert provenance["calibration"]["session_id"] == 42
+    assert provenance["calibration"]["session_label"] == "Race (session 42)"
+    assert provenance["calibration"]["stint_no"] == 1
+    assert provenance["calibration"]["lap_range"] == [1, 6]
+    assert provenance["calibration"]["laps_used"] == 6
+    assert provenance["calibration"]["compound_visual"] == 17
+
+    # The wear rate's parent: this compound's own practice run.
+    assert provenance["wear"]["session_id"] == 41
+    assert provenance["wear"]["stint_no"] == 1
+    assert provenance["wear"]["source"] == "wear_samples"
+    assert provenance["wear_pct_per_lap"] == pytest.approx(5.0, abs=0.01)
+    assert provenance["ms_per_wear_pct"] == payload["wear_calibration"]["ms_per_wear_pct"]
+
+    # And the sessions list says what each one gave.
+    used = {s["id"]: s for s in payload["sessions_used"]}
+    assert "wear-to-time calibration" in used[42]["contributed"]
+    assert "soft wear" in used[41]["contributed"]
+    assert "soft pace" in used[42]["contributed"]
+
+
+def test_a_compounds_own_fit_beats_a_derived_slope() -> None:
+    """Derivation fills gaps; it never overrides a line fitted to the compound's own laps."""
+    sessions, stints, laps, wear = practice_only_weekend()
+    add_long_run(sessions, stints, laps, wear)
+    # A six-lap practice run on the softs, going off three times as fast as the coefficient
+    # would predict for them (85.7 ms/% × 5 %/lap ≈ 429 ms/lap).
+    add_long_run(
+        sessions,
+        stints,
+        laps,
+        wear,
+        session_id=43,
+        compound=16,
+        ms_per_lap=900,
+        base_ms=91_500,
+        wear_per_lap=5.0,
+        session_type=2,
+        name="Practice 2",
+    )
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+
+    soft = next(c for c in payload["compounds"] if c["compound_visual"] == 16)
+    assert soft["pace"]["source"] == "fit"
+    assert soft["pace"]["deg_ms_per_lap"] == pytest.approx(900, abs=5.0)
+    assert soft["pace"]["r2"] is not None
+    assert "derived_from" not in soft["pace"]
+    # Race trim still owns the coefficient, even though the practice run is longer-lived
+    # evidence about the softs specifically.
+    assert payload["wear_calibration"]["session_id"] == 42
+    assert payload["wear_calibration"]["compound_visual"] == 17
+    # The hard, which fitted nothing of its own, is still derived.
+    hard = next(c for c in payload["compounds"] if c["compound_visual"] == 18)
+    assert hard["pace"]["source"] == "derived"
+
+
+def test_a_negative_calibration_is_reported_raw_and_clamped_for_planning() -> None:
+    """Same rule a negative fitted slope already obeys — a set does not get quicker with age."""
+    sessions, stints, laps, wear = practice_only_weekend()
+    add_long_run(sessions, stints, laps, wear, ms_per_lap=-400, base_ms=93_500)
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+
+    calibration = payload["wear_calibration"]
+    assert calibration["ms_per_wear_pct"] == pytest.approx(-400 / 3.5, abs=1.0)
+    assert calibration["ms_per_wear_pct_planned"] == 0.0
+
+    soft = next(c for c in payload["compounds"] if c["compound_visual"] == 16)
+    assert soft["pace"]["deg_ms_per_lap"] < 0, "the measured number is reported unchanged"
+    assert soft["pace"]["deg_ms_per_lap_planned"] == 0.0
+
+    # And the plans really were built on zero, not on the negative: every stint costs exactly
+    # its laps × base pace, plus the pit loss.
+    assert payload["plans_ranking"] == "time"
+    bases = {
+        c["compound_visual"]: c["pace"]["base_ms"] for c in payload["compounds"] if c["pace"]
+    }
+    plan = payload["plans"][0]
+    flat = sum(stint["laps"] * bases[stint["compound_visual"]] for stint in plan["stints"])
+    assert plan["total_time_ms"] == pytest.approx(
+        flat + plan["stops"] * payload["pit_loss_s"] * 1000.0, abs=5.0
+    )
+
+
+def test_a_wet_compound_never_borrows_the_dry_coefficient() -> None:
+    sessions, stints, laps, wear = practice_only_weekend()
+    add_long_run(sessions, stints, laps, wear)
+    sessions.append(strategy_session(44, 2, name="Practice 2", started=1_786_300_000.0))
+    stints[44] = [
+        {"session_id": 44, "car_index": 21, "stint_no": 1, "compound_visual": 7,
+         "lap_start": 1, "lap_end": 3, "wear_at_end_json": {"tyre_wear_pct": [1.5, 1.4, 1.2, 1.3]}}
+    ]
+    laps[44] = race_laps_rows([(lap, 7, lap - 1, 99_000 + lap * 20, 0.0) for lap in range(1, 4)])
+    wear[44] = wear_rows(44, {lap: 0.5 * lap for lap in range(1, 4)})
+
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+    inter = next(c for c in payload["compounds"] if c["compound_visual"] == 7)
+    assert inter["pace"] is None
+    assert inter["feasible"] is False
+    assert "wet-weather" in inter["not_plannable_reason"]
+    assert all(7 not in plan["compounds"] for plan in payload["plans"])
+
+
+def test_a_short_run_that_barely_wore_does_not_become_a_calibration() -> None:
+    """Milliseconds per percent divides by the wear span; a stint that wore nothing would
+    report the driver's lap-to-lap scatter as seconds of degradation."""
+    sessions, stints, laps, wear = practice_only_weekend()
+    add_long_run(sessions, stints, laps, wear, wear_per_lap=0.2)
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+    )
+    assert payload["wear_calibration"] is None
+    assert payload["plans_ranking"] == "heuristic"
+
+
+def test_no_plan_contains_a_token_stint() -> None:
+    """Regression from the live Montreal weekend: with every slope clamped to zero the
+    ranking collapsed to base pace and the 'fastest' plans ran the mandatory second
+    compound for one token lap — an out-lap and in-lap around a stop, no racing. Every
+    stint in every plan, both ranking modes, must run at least MIN_STINT_LAPS."""
+    from f126.analysis.strategy import MIN_STINT_LAPS
+
+    sessions, stints, laps, wear = two_stint_race()
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=13, race_laps_source="request"
+    )
+    assert payload["plans"]
+    for plan in payload["plans"]:
+        for stint in plan["stints"]:
+            assert stint["laps"] >= MIN_STINT_LAPS, (plan["compounds"], stint)
+
+
+def test_time_ranking_survives_a_compound_that_only_has_a_wear_rate() -> None:
+    """A third compound with a wear rate and no pace must not demote a ranked plan set.
+
+    A projected time is strictly more information than a rule, so a weekend that has already
+    modelled two compounds keeps its ranking when a third turns up half-measured — the third
+    is simply left out of the plans rather than dragging the whole sheet down to heuristic.
+    """
+    sessions, stints, laps, wear = two_stint_race()
+    # Three laps on the hards in practice, all of them timeless — the capture joined the
+    # session late and never got a lap time, which is a real shape in this archive. The wear
+    # samples still landed, so the set's life is known and its pace is not.
+    sessions.append(strategy_session(77, 1, name="Practice 1", started=1_786_000_000.0))
+    stints[77] = [
+        {"session_id": 77, "car_index": 21, "stint_no": 1, "compound_visual": 18,
+         "lap_start": 1, "lap_end": 3, "wear_at_end_json": {"tyre_wear_pct": [9.0, 8, 7, 7]}}
+    ]
+    laps[77] = race_laps_rows([(lap, 18, lap - 1, 0, 0.0) for lap in range(1, 4)])
+    wear[77] = wear_rows(77, {lap: 3.5 * lap for lap in range(1, 4)})
+
+    payload = build_strategy(
+        30, sessions, stints, laps, wear, race_laps=13, race_laps_source="request"
+    )
+    hard = next(c for c in payload["compounds"] if c["compound_visual"] == 18)
+    assert hard["wear"]["pct_per_lap"] == pytest.approx(3.5, abs=0.01)
+    assert hard["feasible"] is True
+    assert hard["plannable"] is False
+    assert "base lap time" in hard["not_plannable_reason"]
+    assert payload["plans_ranking"] == "time"
+    assert all(plan["total_time_ms"] is not None for plan in payload["plans"])
+    assert all(18 not in plan["compounds"] for plan in payload["plans"])
+
+
+def test_derived_strategy_is_deterministic_and_json_ready() -> None:
+    import json
+
+    def build() -> dict[str, Any]:
+        sessions, stints, laps, wear = practice_only_weekend()
+        add_long_run(sessions, stints, laps, wear)
+        return build_strategy(
+            30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+        )
+
+    first, second = build(), build()
+    assert first == second
+    assert json.loads(json.dumps(first)) == first
+
+    def build_heuristic() -> dict[str, Any]:
+        sessions, stints, laps, wear = practice_only_weekend()
+        return build_strategy(
+            30, sessions, stints, laps, wear, race_laps=14, race_laps_source="request"
+        )
+
+    assert build_heuristic() == build_heuristic()
+    assert json.loads(json.dumps(build_heuristic())) == build_heuristic()
+
+
 def test_strategy_finds_the_player_wherever_the_game_put_them() -> None:
     """Car 21 is where a real career session puts the player; car 0 is an AI."""
     sessions, stints, laps, wear = two_stint_race()

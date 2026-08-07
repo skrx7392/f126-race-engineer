@@ -99,6 +99,16 @@ losses in this project: a compound nobody drove at this track comes back `untest
 every model field `null`, and a plan that would need it is not offered. A missing input is
 never a default.
 
+Evidence comes in two grades and the payload always says which is in play. **Two laps** on a
+set is a wear rate, which is enough to know how long that set lasts and therefore enough to
+enumerate plans and say they finish — those come back ranked by a stated rule, with every
+projected time `null` (`plans_ranking: "heuristic"`). **Four clean laps** on any one set at
+the circuit additionally calibrates lap time against *cumulative wear*, giving a track-level
+`ms_per_wear_pct` that every compound with a wear rate can be multiplied by to get a slope —
+those plans are ranked on projected time as before (`plans_ranking: "time"`), with each
+borrowed slope marked `source: "derived"` and naming both stints it was assembled from. A
+compound with its own four-lap fit always keeps it.
+
 `race_laps` omitted defaults to the most recent race-type session (`session_type` 15–17) at
 this circuit that recorded its own `total_laps`. A circuit with sessions but no such race is
 a **422** naming `race_laps`, because guessing a race length silently decides the stop count.
@@ -110,29 +120,58 @@ not a circuit.
 {"track_id": 30, "track_name": "Miami", "race_laps": 14,
  "race_laps_source": "Race 2 (session 229)",   // or "request"
  "wear_cliff_pct": 28.0,
+ "wear_calibration": {                          // null when nothing here ran long enough
+   "ms_per_wear_pct": 195.0, "r2": 0.6728, "laps_used": 6, "wear_span_pct": 29.0,
+   "compound_visual": 16, "name": "Soft", "evidence": "race",
+   "session_id": 229, "session_label": "Race 2 (session 229)",
+   "stint_no": 1, "lap_range": [1, 7],
+   "assumption": "time lost per percent of worst-wheel wear is treated as the same ..."},
  "compounds": [
    {"compound_visual": 16, "name": "Soft", "dry": true, "untested": false, "stints_seen": 2,
     "evidence": "race",                        // "race" | "practice" | null
     "pace": {"base_ms": 88643.2, "deg_ms_per_lap": 1162.4, "r2": 0.6924, "laps_used": 6,
              "evidence": "race", "session_id": 229, "session_label": "Race 2 (session 229)",
-             "stint_no": 1, "lap_range": [1, 7]},
+             "stint_no": 1, "lap_range": [1, 7], "source": "fit"},
     "wear": {"pct_per_lap": 5.87, "source": "wear_samples", "laps": 6, "evidence": "race",
              "session_id": 229, "session_label": "Race 2 (session 229)", "stint_no": 1},
     "max_stint_laps": 4, "projected_wear_at_max_pct": 23.5,
-    "plannable": true, "not_plannable_reason": null},
+    "feasible": true, "plannable": true, "not_plannable_reason": null},
+   {"compound_visual": 17, "name": "Medium", "dry": true, "untested": false, "stints_seen": 1,
+    "evidence": "race",
+    // No four-lap run of its own, so the slope is the track coefficient × its wear rate.
+    "pace": {"base_ms": 88665.0, "deg_ms_per_lap": 735.1, "r2": null, "laps_used": 3,
+             "evidence": "race", "session_id": 229, "session_label": "Race 2 (session 229)",
+             "stint_no": 1, "lap_range": [1, 7], "source": "derived",
+             "base_source": {"source": "median_clean_laps", "laps": 3, "evidence": "race",
+                             "session_ids": [229]},
+             "derived_from": {
+               "ms_per_wear_pct": 195.0, "wear_pct_per_lap": 3.77,
+               "calibration": {"compound_visual": 16, "name": "Soft", "evidence": "race",
+                               "session_id": 229, "session_label": "Race 2 (session 229)",
+                               "stint_no": 1, "lap_range": [1, 7], "laps_used": 6,
+                               "r2": 0.6728, "wear_span_pct": 29.0},
+               "wear": {"source": "wear_samples", "laps": 6, "evidence": "race",
+                        "session_id": 229, "session_label": "Race 2 (session 229)",
+                        "stint_no": 2}}},
+    "wear": {"pct_per_lap": 3.77, "source": "wear_samples", "laps": 6, "evidence": "race",
+             "session_id": 229, "session_label": "Race 2 (session 229)", "stint_no": 2},
+    "max_stint_laps": 7, "projected_wear_at_max_pct": 26.4,
+    "feasible": true, "plannable": true, "not_plannable_reason": null},
    {"compound_visual": 18, "name": "Hard", "dry": true, "untested": true, "stints_seen": 0,
     "evidence": null, "pace": null, "wear": null, "max_stint_laps": null,
-    "plannable": false,
+    "feasible": false, "plannable": false,
     "not_plannable_reason": "no stint on this compound was recorded this weekend"}],
  "plans": [
    {"rank": 1, "stops": 1, "compounds": [16, 18], "label": "Soft → Hard",
     "stints": [{"compound_visual": 16, "name": "Soft", "lap_start": 1, "lap_end": 4,
                 "laps": 4, "projected_end_wear_pct": 23.5}, ...],
-    "total_time_ms": 1253110.0, "delta_to_best_ms": 0.0,
+    "total_time_ms": 1253110.0, "delta_to_best_ms": 0.0,   // both null when heuristic
     "pit_windows": [{"stop": 1, "planned_lap": 4, "earliest_lap": 2, "latest_lap": 4,
                      "window_laps": 2}],
     "safety_car": {"flexibility": "flexible", "note": "stop 1 can be taken anywhere ..."}}],
  "plans_considered": 6,
+ "plans_ranking": "time",                       // "time" | "heuristic" | null
+ "plans_ranking_note": "ranked on projected race time: every compound in these plans ...",
  "fuel": {"kg_per_lap": 1.064, "laps_measured": 17, "evidence": "race",
           "session_ids": [196, 229], "race_laps": 14, "margin_laps": 0.45,
           "slider_laps": 14.45, "recommended_kg": 15.37},
@@ -152,18 +191,21 @@ not a circuit.
 | `wear_cliff_pct` | Max-wheel wear treated as the performance cliff. **Telemetry percent**, which is roughly *half* what the in-game display shows; the ratio is uncalibrated and is never applied to a computed number. |
 | `compounds[].untested` | No stint on this compound at this circuit. Every model field is `null`. All three dry compounds are always listed, so an untested one is a visible fact rather than a missing row. |
 | `compounds[].evidence` | Tier of the weaker of the two models below it. `race` = session type 10–17 (the races and the sprint weekend's sessions); `practice` = types 1–9. Race trim always wins the tie-break when both exist, because practice degradation and wear run at roughly double race rate. |
-| `compounds[].pace` | The `stints` endpoint's own fit, taken from the best-evidenced stint — not recomputed. `deg_ms_per_lap_planned` appears (as `0.0`) only when the measured slope was negative and the planner clamped it. |
+| `wear_calibration` | The circuit's **wear-to-time coefficient**: one stint's lap time regressed against *cumulative worst-wheel wear* instead of lap number, so the slope is ms lost per percent of wear rather than per lap. Chosen from the stints with ≥ 4 clean laps (same exclusion rules as the fit) and ≥ 2 % of wear covered, race trim preferred, dry slicks only. `null` when no stint qualified, with the reason in `omitted.wear_calibration`. `ms_per_wear_pct_planned` appears (as `0.0`) when the measured coefficient was negative and planning clamped it. `assumption` states, in the payload, the thing this rests on: that a percent of wear costs the same lap time on all three dry compounds here. |
+| `compounds[].pace` | `source: "fit"` — the `stints` endpoint's own line through this compound's laps against tyre age, taken from the best-evidenced stint, not recomputed. `source: "derived"` — `wear_calibration.ms_per_wear_pct × wear.pct_per_lap`, for a compound with a wear rate and no four-lap run of its own; `r2` is `null` (nothing was fitted to these laps), `base_ms` is the **median of this compound's clean laps at this circuit** (`base_source`; a stint average, not an age-zero pace, and not fuel-normalised), and `session_id`/`stint_no`/`lap_range` describe the *calibration* stint, because that is where the slope was measured. `derived_from` names both parents — the calibration stint and the wear-rate stint. A direct fit always beats a derived slope for the same compound. `deg_ms_per_lap_planned` appears (as `0.0`) only when the slope was negative and the planner clamped it. |
 | `compounds[].wear` | Worst-wheel %/lap. `source` is `wear_samples` (least-squares over the stint's own 1 Hz samples) or `stint_end_wear` (end reading ÷ laps run) when samples are missing. |
 | `compounds[].max_stint_laps` | `floor(wear_cliff_pct / wear.pct_per_lap)`, capped at `race_laps`. `null` without a wear rate. |
-| `compounds[].plannable` | Has a pace model, a wear rate, and is a dry compound. `not_plannable_reason` is populated whenever this is false. |
-| `plans` | Every legal 1- and 2-stop ordering, ranked by `total_time_ms`. Legal = at least two distinct dry compounds (FIA two-compound rule) and every stint inside its wear cap. Capped at 12 returned; `plans_considered` is the full count. Empty means no legal plan — `omitted.plans` says why. |
-| `plans[].total_time_ms` | Sum of per-lap times from the degradation fits, plus `pit_loss_s` per stop. Stint lengths are the allocation that minimises this, exactly (the objective is convex and separable). |
+| `compounds[].feasible` | Dry, with a measured wear rate: enough to know how long a set of it lasts, and therefore enough to put it in a plan and say that plan finishes. Two laps on a set is enough. |
+| `compounds[].plannable` | `feasible`, plus a pace model (fitted or derived) — enough to rank a plan on projected time. `not_plannable_reason` is populated whenever this is false, and says whether the compound is still usable for feasibility. |
+| `plans` | Every legal 1- and 2-stop ordering. Legal = at least two distinct dry compounds (FIA two-compound rule) and every stint inside its wear cap. Capped at 12 returned; `plans_considered` is the full count. Empty means no legal plan — `omitted.plans` says why. |
+| `plans_ranking` | How the returned set was ordered, because the two orderings are not comparable. `time`: every compound in the set has a pace model, plans are ranked on `total_time_ms`, and rank 1 is the fastest. `heuristic`: at least one compound has a wear rate and no pace model, so **no time is projected for any plan in the set** — `total_time_ms` and `delta_to_best_ms` are `null` — and the order is fewest stops first, then the softer compound (lower visual number) earlier. `null` only when `plans` is empty. Time ranking is attempted first and kept whenever it yields anything, over the compounds that have pace models; the feasibility set is the fallback, so gaining a wear rate never costs a circuit its ranked plans. `plans_ranking_note` is the rule in words. |
+| `plans[].total_time_ms` | Sum of per-lap times from the degradation models, plus `pit_loss_s` per stop. Stint lengths are the allocation that minimises this, exactly (the objective is convex and separable). `null` under heuristic ranking, where lap counts are instead split so no stint ends closer to the wear ceiling than any other. Pit windows, projected wear and the safety-car note are real in both modes. |
 | `plans[].pit_windows` | Per stop: the planned box lap and the earliest/latest lap it could be taken on while still covering the race inside every wear cap. Exact feasibility bounds, not heuristics. |
 | `plans[].safety_car` | `flexible` when some stop's window is ≥ 3 laps wide (a safety car inside it is close to a free stop), `tight` when the wear ceiling fixes when you box, `none` with no stop left. |
 | `fuel` | `kg_per_lap` is the mean of `fuel_start_kg - fuel_end_kg` over the laps the stint fit did **not** exclude — i.e. racing laps, not in/out/deleted ones. `recommended_kg = (race_laps + margin_laps) × kg_per_lap`; `slider_laps = race_laps + margin_laps`, which is the unit the game's fuel slider uses. `null` when fewer than 3 laps carried both tank readings, with the reason in `omitted.fuel`. |
 | `pit_loss` | `measured`: the pit lap's excess over the driver's own clean-lap median in the same race, median over every stop found at this circuit. `default`: a named constant, used only when the circuit has no recorded stop, and always flagged. |
 | `sessions_used` | Every session read, in start order, with `contributed` naming what each one supplied. A session read that gave nothing appears with an empty list. |
-| `omitted` | Section name → why it could not be computed. Present sections are always real numbers; a missing input never becomes a zero. |
+| `omitted` | Section name → why it could not be computed. Keys seen here: `fuel`, `plans`, `wear_calibration` (the last only when some compound would have used a derived slope and no stint could calibrate one). Present sections are always real numbers; a missing input never becomes a zero. |
 
 Deterministic for a given `(track_id, race_laps)` and a given database state. Sessions are
 deduplicated to one row per `session_uid` (the same rule `GET /api/sessions` uses), so a
@@ -226,6 +268,11 @@ task off the capture path, skipped when the feature is unconfigured), and on dem
   slider laps, ranked plan cards (stint bars at true lap width, projected loss against the
   best plan, pit window, safety-car note), the per-compound model table with its evidence
   tier and untested rows, and a provenance footer naming every session it was built from.
+  The plan section carries a **ranking badge** — "ranked on pace models" or "ranked by rule
+  — no pace model yet; times not projected" — and a rule-ranked set shows an em-dash where
+  each plan's race time and delta would be. The degradation column marks a **derived** slope
+  beside the figure, so it cannot be read as a line fitted to that tyre, and the provenance
+  footer states the circuit's coefficient and the assumption it rests on.
   Track-scoped, not session-scoped: the picker lists circuits that have sessions, and both
   the sessions browser and the session detail page link into it by track.
 Live pit wall stays the default route (`#/` = current behavior, untouched).

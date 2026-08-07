@@ -286,3 +286,43 @@ Reversals welcome — flag anything and I'll adjust.
     same greedy step, so `npm run dev:mock` exercises a plan whose stint lengths and pit
     windows are internally consistent, and the untested-compound and no-legal-plan paths are
     reachable by changing inputs instead of by hand-writing a second payload.
+
+38. **A wear rate alone earns plans; it just does not earn a time.** The weekend this
+    recorder actually sees is two or three laps a set, which can never produce the four
+    clean laps a degradation line needs — so the strategy page was permanently one race
+    behind, unlocking only after a compound had already been raced. A wear rate needs two
+    laps and is enough to know how long a set lasts, which is enough to enumerate the same
+    plans, cap the same stints and compute the same pit windows. Those come back with
+    `plans_ranking: "heuristic"` and **every projected-time field null** — never a fabricated
+    number — ordered by a rule stated in the payload: fewest stops first, then the softer
+    compound earlier. Laps inside such a plan are split so no stint ends closer to its wear
+    ceiling than another, which is the only measured thing left to optimise. Time ranking is
+    tried first and kept whenever it produces anything, so a third compound picking up a
+    two-lap wear rate can never demote a set that was already ranked on pace.
+
+39. **Degradation is derived by indexing lap time on wear, not on lap number.** One stint at
+    a circuit with ≥ `MIN_FIT_LAPS` clean laps is regressed against *cumulative* worst-wheel
+    wear (per-lap deltas, so a bad sample costs one step rather than the whole axis) instead
+    of tyre age. The slope is a track-level `ms_per_wear_pct`, and any compound with a
+    measured wear rate and no fit of its own gets `deg = ms_per_wear_pct × wear_pct_per_lap`,
+    marked `source: "derived"` with both parents named. The assumption — that a percent of
+    wear costs the same lap time on all three dry slicks here — is stated in the source, in
+    the payload (`wear_calibration.assumption`) and on the page, because it is an assumption
+    and the direct fit it substitutes for is not. A compound's own fit always wins; wets
+    neither calibrate it nor borrow it; a stint that covered less than
+    `MIN_CALIBRATION_WEAR_SPAN_PCT` of wear is refused, because dividing lap-to-lap scatter
+    by a tiny span reports driver noise as seconds of degradation. Validated on real rows:
+    Miami's six-lap soft race stint calibrates 195 ms/%, which hands the untested-in-anger
+    medium 735 ms/lap and the hard 562 ms/lap and turns "no legal plan" into a ranked sheet.
+    Base pace for a derived model is the median of that compound's own clean laps at the
+    circuit — a stint average rather than an age-zero pace, and deliberately **not**
+    fuel-normalised, which is stated in `base_source` rather than hidden.
+
+40. **A negative coefficient is reported raw and clamped to zero for planning**, the same
+    convention `deg_ms_per_lap_planned` already carries and for the same reason. Montreal's
+    only long run got quicker as it wore (fuel burning off through a six-lap race), so its
+    coefficient is −125 ms/% and every derived slope there is negative; the payload shows
+    those numbers and the allocator uses zero. Worth recording that this makes every plan at
+    such a circuit flat in time, so ranking falls back to base pace alone and the cheapest
+    way to satisfy the two-compound rule becomes a one-lap token stint. It is honest — that
+    *is* what the data says — but a minimum-stint-length rule is the obvious follow-up.

@@ -245,6 +245,63 @@ export type EvidenceTier = 'race' | 'practice';
 /** Where a wear rate came from. Samples beat the stint's end reading. */
 export type WearSource = 'wear_samples' | 'stint_end_wear';
 
+/**
+ * How a compound got its degradation slope.
+ *
+ * `fit` is a line through this compound's own laps against tyre age. `derived` is the
+ * circuit's `ms_per_wear_pct` coefficient — measured on *some other* stint — multiplied by
+ * this compound's own wear rate, which rests on the assumption that a percent of wear costs
+ * the same lap time whichever dry slick gave it up. The two must be told apart on screen: a
+ * derived slope is a good estimate, not a measurement of this tyre.
+ */
+export type PaceSource = 'fit' | 'derived';
+
+/** How a derived model's base lap time was arrived at. */
+export interface StrategyBaseSource {
+  source: 'median_clean_laps';
+  laps: number;
+  evidence: EvidenceTier;
+  session_ids: number[];
+}
+
+/** The stint a derived slope's coefficient was measured on. */
+export interface StrategyCalibrationStint {
+  compound_visual: number;
+  name: string;
+  evidence: EvidenceTier | null;
+  session_id: number;
+  session_label: string;
+  stint_no: number | null;
+  lap_range: Array<number | null>;
+  laps_used: number;
+  r2: number;
+  wear_span_pct: number;
+}
+
+/** Both parents of a derived slope: the coefficient's stint and the wear rate's stint. */
+export interface StrategyDerivedFrom {
+  ms_per_wear_pct: number;
+  wear_pct_per_lap: number;
+  calibration: StrategyCalibrationStint;
+  wear: {
+    source: WearSource | null;
+    laps: number;
+    evidence: EvidenceTier | null;
+    session_id: number;
+    session_label: string;
+    stint_no: number | null;
+  } | null;
+}
+
+/** The circuit's wear-to-time coefficient. Null when no stint here ran long enough. */
+export interface StrategyWearCalibration extends StrategyCalibrationStint {
+  ms_per_wear_pct: number;
+  /** Present (as `0`) only when the measured coefficient was negative and was clamped. */
+  ms_per_wear_pct_planned?: number;
+  /** The assumption the coefficient rests on, in the sheet's own words. */
+  assumption: string;
+}
+
 /** One compound's lap-time model: the `stints` fit, with the stint it was read from. */
 export interface StrategyPace {
   base_ms: number | null;
@@ -261,8 +318,16 @@ export interface StrategyPace {
   session_id: number;
   session_label: string;
   stint_no: number | null;
-  /** `[lap_start, lap_end]` of the stint this was fitted over. */
+  /**
+   * `[lap_start, lap_end]` of the stint this came from — the fitted stint when `source` is
+   * `fit`, the calibration stint when it is `derived`.
+   */
   lap_range: Array<number | null>;
+  source: PaceSource;
+  /** Derived models only: where the base lap time was taken from. */
+  base_source?: StrategyBaseSource;
+  /** Derived models only: the coefficient's stint and the wear rate's stint. */
+  derived_from?: StrategyDerivedFrom;
 }
 
 /** One compound's wear rate, in telemetry percent of the worst wheel per lap. */
@@ -290,6 +355,12 @@ export interface StrategyCompound {
   /** Laps before projected wear reaches the cliff. Null when the wear rate is unknown. */
   max_stint_laps: number | null;
   projected_wear_at_max_pct?: number;
+  /**
+   * A dry compound with a measured wear rate: enough to know a plan using it *finishes*,
+   * whether or not there is a lap-time model to say how fast it is.
+   */
+  feasible: boolean;
+  /** `feasible`, plus a lap-time model — enough to rank a plan on projected time. */
   plannable: boolean;
   /** Present whenever `plannable` is false, in the sheet's own words. */
   not_plannable_reason: string | null;
@@ -318,15 +389,26 @@ export interface StrategySafetyCar {
   note: string;
 }
 
+/**
+ * How a plan set was ordered.
+ *
+ * `time` is a measurement — projected race time from every compound's lap-time model.
+ * `heuristic` is a stated preference, used when at least one compound in the set has a wear
+ * rate and no lap-time model at all: fewest stops first, then the softer compound earlier.
+ * A heuristic set carries no projected times, because there is nothing to project from.
+ */
+export type PlansRanking = 'time' | 'heuristic';
+
 export interface StrategyPlan {
   rank: number;
   stops: number;
   compounds: number[];
   label: string;
   stints: StrategyPlanStint[];
-  total_time_ms: number;
-  /** Projected loss against the best-ranked plan. Zero for rank 1, never negative. */
-  delta_to_best_ms: number;
+  /** Null for a heuristically ranked plan: feasible, with no measurable time. */
+  total_time_ms: number | null;
+  /** Projected loss against the best-ranked plan. Zero for rank 1; null when heuristic. */
+  delta_to_best_ms: number | null;
   pit_windows: StrategyPitWindow[];
   safety_car: StrategySafetyCar;
 }
@@ -377,10 +459,16 @@ export interface StrategyResponse {
   /** How `race_laps` was arrived at: `"request"`, or the session that named it. */
   race_laps_source: string;
   wear_cliff_pct: number;
+  /** The circuit's ms-per-percent-of-wear coefficient; null when nothing calibrated one. */
+  wear_calibration: StrategyWearCalibration | null;
   compounds: StrategyCompound[];
-  /** Ranked fastest first. Empty when no legal plan exists; `omitted.plans` says why. */
+  /** Ranked best first. Empty when no legal plan exists; `omitted.plans` says why. */
   plans: StrategyPlan[];
   plans_considered: number;
+  /** How `plans` was ordered. Null only when there are no plans. */
+  plans_ranking: PlansRanking | null;
+  /** The ordering rule in words, for the page to show beside the badge. */
+  plans_ranking_note: string | null;
   /** Null when the weekend recorded no usable fuel data; `omitted.fuel` says so. */
   fuel: StrategyFuel | null;
   pit_loss_s: number;

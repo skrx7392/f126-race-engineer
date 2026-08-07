@@ -37,11 +37,13 @@ import type {
   Lap,
   LapTelemetry,
   Participant,
+  PlansRanking,
   SessionDetail,
   SessionSummary,
   Stint,
   StintLap,
   StintsResponse,
+  StrategyCalibrationStint,
   StrategyCompound,
   StrategyPlan,
   StrategyPlanStint,
@@ -439,6 +441,22 @@ export const HEADLINE_SESSION_ID = 3;
 const QUALI_SESSION_ID = 2;
 const OTHER_TRACK_SESSION_ID = 1;
 
+/**
+ * A second strategy circuit, and the reason it exists.
+ *
+ * Bahrain is a modelled weekend: two compounds fitted out of the race, one out of quali, and
+ * a hard that only ever did a short run and gets its slope derived from the circuit's
+ * wear-to-time coefficient. Montreal is the *other* weekend — the one this recorder actually
+ * sees most of the time — where every set did an out-lap, two flyers and an in-lap, so
+ * nothing can be fitted, nothing can be calibrated, and the only honest plan set is a
+ * feasibility one ranked by rule. Both have to be reachable in `dev:mock` or half of this
+ * page can only be seen against production data.
+ */
+export const MONTREAL_TRACK_ID = 6;
+const MONTREAL_PRACTICE_SESSION_ID = 4;
+const MONTREAL_RACE_SESSION_ID = 5;
+const MONTREAL_RACE_LAPS = 14;
+
 /** Wall-clock anchor. Fixed, so the fixture is byte-identical between runs. */
 const BASE_WALL = 1_771_000_000;
 
@@ -485,6 +503,28 @@ const SESSION_SEEDS: readonly SessionSeed[] = [
     trackName: 'Monza',
     laps: 12,
     startedOffset: -172_800,
+    durationS: 3600,
+    totalLaps: null
+  },
+  {
+    id: MONTREAL_RACE_SESSION_ID,
+    type: 15,
+    typeName: 'Race',
+    trackId: MONTREAL_TRACK_ID,
+    trackName: 'Montreal',
+    laps: MONTREAL_RACE_LAPS,
+    startedOffset: -601_200,
+    durationS: 3600,
+    totalLaps: MONTREAL_RACE_LAPS
+  },
+  {
+    id: MONTREAL_PRACTICE_SESSION_ID,
+    type: 1,
+    typeName: 'Practice 1',
+    trackId: MONTREAL_TRACK_ID,
+    trackName: 'Montreal',
+    laps: 9,
+    startedOffset: -604_800,
     durationS: 3600,
     totalLaps: null
   }
@@ -1231,17 +1271,44 @@ const WEAR_CLIFF_PCT = 28.0;
 const FUEL_MARGIN_LAPS = 0.45;
 const MAX_PLANS = 12;
 const SC_FLEXIBLE_WINDOW_LAPS = 3;
+const MIN_FIT_LAPS = 4;
 const FUEL_KG_PER_LAP = 1.82;
 const PIT_LOSS_S = 20.6;
+/** `analysis/strategy.py::DEFAULT_PIT_LOSS_S`, for a circuit with no recorded stop. */
+const DEFAULT_PIT_LOSS_S = 21.0;
+
+/** The two ranking notes, word for word as `strategy.py::_RANKING_NOTES` emits them. */
+const RANKING_NOTES: Record<PlansRanking, string> = {
+  time:
+    'ranked on projected race time: every compound in these plans has a lap-time model, ' +
+    "and each plan's stint lengths are the split that minimises the sum of those models " +
+    'plus the pit loss.',
+  heuristic:
+    'ranked by rule, not by time: at least one compound here has a measured wear rate but ' +
+    'no lap-time model, so no race time is projected for any of these plans — fewest stops ' +
+    'first, then the softer compound earlier. The stint lengths, pit windows and projected ' +
+    'wear are all real; only the order is a preference. Run four clean laps on one set at ' +
+    'this circuit and the whole set becomes time-ranked.'
+};
+
+const CALIBRATION_ASSUMPTION =
+  'time lost per percent of worst-wheel wear is treated as the same for all three dry ' +
+  'compounds at this circuit. That is an assumption, not a measurement: it is what lets a ' +
+  'compound with a wear rate and no lap-time fit of its own be given a slope. A compound ' +
+  'with its own four-lap fit always keeps it.';
 
 interface CompoundEvidence {
   compound: number;
   name: string;
-  /** Fitted lap time at age zero. */
-  baseMs: number;
-  degMsPerLap: number;
-  r2: number;
-  lapsUsed: number;
+  /**
+   * The stint's own least-squares line, when it ran long enough for one. Absent means the
+   * set never did `MIN_FIT_LAPS` clean laps — the ordinary practice run — and the slope, if
+   * there is one at all, is derived from the circuit's coefficient instead.
+   */
+  fit?: { baseMs: number; degMsPerLap: number; r2: number; lapsUsed: number };
+  /** Base pace for a derived model: the middle of this compound's own clean laps here. */
+  medianCleanMs?: number;
+  medianCleanLaps?: number;
   wearPctPerLap: number;
   wearLaps: number;
   wearSource: 'wear_samples' | 'stint_end_wear';
@@ -1252,12 +1319,30 @@ interface CompoundEvidence {
   lapRange: [number, number];
 }
 
+/** The one stint at a circuit that lap time was regressed against cumulative wear on. */
+interface CalibrationEvidence {
+  msPerWearPct: number;
+  compound: number;
+  name: string;
+  evidence: 'race' | 'practice';
+  sessionId: number;
+  sessionLabel: string;
+  stintNo: number;
+  lapRange: [number, number];
+  lapsUsed: number;
+  r2: number;
+  wearSpanPct: number;
+}
+
 /**
  * What the weekend measured, per circuit.
  *
- * Bahrain has the full picture: two compounds out of the race and a third out of
- * qualifying, which is the interesting case — the soft's model is real but it is
- * *practice* evidence, and the page has to say so. Monza has one session and no
+ * Bahrain has the full picture: two compounds fitted out of the race and quali, and a hard
+ * that only ever did a short run — a wear rate and no line of its own — so its slope is
+ * *derived* from the circuit's wear-to-time coefficient. That is the case the compound table
+ * has to mark, because a derived slope is a good estimate and not a measurement of that
+ * tyre. Montreal is the weekend with no long run anywhere: three wear rates, no fits, no
+ * coefficient, and therefore feasibility plans ranked by rule. Monza has one session and no
  * race at all, so it exercises the "tell me how long the race is" 422.
  */
 const STRATEGY_EVIDENCE: Record<number, CompoundEvidence[]> = {
@@ -1265,10 +1350,7 @@ const STRATEGY_EVIDENCE: Record<number, CompoundEvidence[]> = {
     {
       compound: 17,
       name: 'Medium',
-      baseMs: 93_050,
-      degMsPerLap: 168,
-      r2: 0.88,
-      lapsUsed: 8,
+      fit: { baseMs: 93_050, degMsPerLap: 168, r2: 0.88, lapsUsed: 8 },
       wearPctPerLap: 3.35,
       wearLaps: 10,
       wearSource: 'wear_samples',
@@ -1279,14 +1361,13 @@ const STRATEGY_EVIDENCE: Record<number, CompoundEvidence[]> = {
       lapRange: [1, PIT_IN_LAP]
     },
     {
+      // Three laps at the end of the race and the flag: a wear rate, and nothing to fit.
       compound: 18,
       name: 'Hard',
-      baseMs: 93_480,
-      degMsPerLap: 121,
-      r2: 0.81,
-      lapsUsed: 7,
+      medianCleanMs: 93_910,
+      medianCleanLaps: 3,
       wearPctPerLap: 2.9,
-      wearLaps: 8,
+      wearLaps: 3,
       wearSource: 'wear_samples',
       evidence: 'race',
       sessionId: HEADLINE_SESSION_ID,
@@ -1298,27 +1379,161 @@ const STRATEGY_EVIDENCE: Record<number, CompoundEvidence[]> = {
       // Quali running: quick, and going off twice as fast as anything in the race.
       compound: 16,
       name: 'Soft',
-      baseMs: 91_720,
-      degMsPerLap: 402,
-      r2: 0.74,
-      lapsUsed: 5,
+      fit: { baseMs: 91_720, degMsPerLap: 402, r2: 0.74, lapsUsed: 5 },
       wearPctPerLap: 6.2,
       wearLaps: 5,
       wearSource: 'stint_end_wear',
       evidence: 'practice',
-      sessionId: 2,
-      sessionLabel: 'Qualifying 3 (session 2)',
+      sessionId: QUALI_SESSION_ID,
+      sessionLabel: `Qualifying 3 (session ${QUALI_SESSION_ID})`,
       stintNo: 1,
       lapRange: [1, 6]
+    }
+  ],
+  [MONTREAL_TRACK_ID]: [
+    {
+      compound: 16,
+      name: 'Soft',
+      medianCleanMs: 76_240,
+      medianCleanLaps: 2,
+      wearPctPerLap: 5.4,
+      wearLaps: 2,
+      wearSource: 'wear_samples',
+      evidence: 'practice',
+      sessionId: MONTREAL_PRACTICE_SESSION_ID,
+      sessionLabel: `Practice 1 (session ${MONTREAL_PRACTICE_SESSION_ID})`,
+      stintNo: 1,
+      lapRange: [1, 3]
+    },
+    {
+      compound: 17,
+      name: 'Medium',
+      medianCleanMs: 76_880,
+      medianCleanLaps: 2,
+      wearPctPerLap: 3.6,
+      wearLaps: 2,
+      wearSource: 'wear_samples',
+      evidence: 'practice',
+      sessionId: MONTREAL_PRACTICE_SESSION_ID,
+      sessionLabel: `Practice 1 (session ${MONTREAL_PRACTICE_SESSION_ID})`,
+      stintNo: 2,
+      lapRange: [3, 6]
+    },
+    {
+      compound: 18,
+      name: 'Hard',
+      medianCleanMs: 77_410,
+      medianCleanLaps: 2,
+      wearPctPerLap: 2.7,
+      wearLaps: 2,
+      wearSource: 'wear_samples',
+      evidence: 'practice',
+      sessionId: MONTREAL_PRACTICE_SESSION_ID,
+      sessionLabel: `Practice 1 (session ${MONTREAL_PRACTICE_SESSION_ID})`,
+      stintNo: 3,
+      lapRange: [6, 8]
     }
   ],
   11: []
 };
 
+/**
+ * Bahrain's race stint on the mediums, regressed against wear instead of lap number: 168 ms
+ * a lap over 3.35 % of wear a lap is 50.1 ms per percent. Montreal has none — no stint there
+ * ran four clean laps — which is exactly what puts its plans on the heuristic path.
+ */
+const STRATEGY_CALIBRATION: Record<number, CalibrationEvidence | undefined> = {
+  [BAHRAIN_TRACK_ID]: {
+    msPerWearPct: 50.1,
+    compound: 17,
+    name: 'Medium',
+    evidence: 'race',
+    sessionId: HEADLINE_SESSION_ID,
+    sessionLabel: `Race (session ${HEADLINE_SESSION_ID})`,
+    stintNo: 1,
+    lapRange: [1, PIT_IN_LAP],
+    lapsUsed: 8,
+    r2: 0.86,
+    wearSpanPct: 30.2
+  }
+};
+
+/** The calibration stint block, shared by the top-level coefficient and every borrower. */
+function calibrationStint(c: CalibrationEvidence): StrategyCalibrationStint {
+  return {
+    compound_visual: c.compound,
+    name: c.name,
+    evidence: c.evidence,
+    session_id: c.sessionId,
+    session_label: c.sessionLabel,
+    stint_no: c.stintNo,
+    lap_range: [c.lapRange[0], c.lapRange[1]],
+    laps_used: c.lapsUsed,
+    r2: c.r2,
+    wear_span_pct: c.wearSpanPct
+  };
+}
+
+function strategyPace(
+  evidence: CompoundEvidence,
+  calibration: CalibrationEvidence | undefined
+): StrategyCompound['pace'] {
+  if (evidence.fit) {
+    return {
+      base_ms: evidence.fit.baseMs,
+      deg_ms_per_lap: evidence.fit.degMsPerLap,
+      r2: evidence.fit.r2,
+      laps_used: evidence.fit.lapsUsed,
+      evidence: evidence.evidence,
+      session_id: evidence.sessionId,
+      session_label: evidence.sessionLabel,
+      stint_no: evidence.stintNo,
+      lap_range: [evidence.lapRange[0], evidence.lapRange[1]],
+      source: 'fit'
+    };
+  }
+  if (!calibration || evidence.medianCleanMs == null) return null;
+  // The coefficient times this compound's own wear rate. Both parents travel with it.
+  const deg = Math.round(calibration.msPerWearPct * evidence.wearPctPerLap * 10) / 10;
+  const weaker = calibration.evidence === 'practice' ? 'practice' : evidence.evidence;
+  return {
+    base_ms: evidence.medianCleanMs,
+    deg_ms_per_lap: deg,
+    r2: null,
+    laps_used: evidence.medianCleanLaps ?? 0,
+    evidence: weaker,
+    session_id: calibration.sessionId,
+    session_label: calibration.sessionLabel,
+    stint_no: calibration.stintNo,
+    lap_range: [calibration.lapRange[0], calibration.lapRange[1]],
+    source: 'derived',
+    base_source: {
+      source: 'median_clean_laps',
+      laps: evidence.medianCleanLaps ?? 0,
+      evidence: evidence.evidence,
+      session_ids: [evidence.sessionId]
+    },
+    derived_from: {
+      ms_per_wear_pct: calibration.msPerWearPct,
+      wear_pct_per_lap: evidence.wearPctPerLap,
+      calibration: calibrationStint(calibration),
+      wear: {
+        source: evidence.wearSource,
+        laps: evidence.wearLaps,
+        evidence: evidence.evidence,
+        session_id: evidence.sessionId,
+        session_label: evidence.sessionLabel,
+        stint_no: evidence.stintNo
+      }
+    }
+  };
+}
+
 function strategyCompound(
   compound: number,
   evidence: CompoundEvidence | undefined,
-  raceLaps: number
+  raceLaps: number,
+  calibration: CalibrationEvidence | undefined
 ): StrategyCompound {
   const name = compoundLabel(compound);
   if (!evidence) {
@@ -1332,6 +1547,7 @@ function strategyCompound(
       pace: null,
       wear: null,
       max_stint_laps: null,
+      feasible: false,
       plannable: false,
       not_plannable_reason: 'no stint on this compound was recorded this weekend'
     };
@@ -1340,24 +1556,15 @@ function strategyCompound(
     1,
     Math.min(raceLaps, Math.floor(WEAR_CLIFF_PCT / evidence.wearPctPerLap))
   );
+  const pace = strategyPace(evidence, calibration);
   return {
     compound_visual: compound,
     name: evidence.name,
     dry: true,
     untested: false,
     stints_seen: 1,
-    evidence: evidence.evidence,
-    pace: {
-      base_ms: evidence.baseMs,
-      deg_ms_per_lap: evidence.degMsPerLap,
-      r2: evidence.r2,
-      laps_used: evidence.lapsUsed,
-      evidence: evidence.evidence,
-      session_id: evidence.sessionId,
-      session_label: evidence.sessionLabel,
-      stint_no: evidence.stintNo,
-      lap_range: [evidence.lapRange[0], evidence.lapRange[1]]
-    },
+    evidence: pace?.evidence ?? evidence.evidence,
+    pace,
     wear: {
       pct_per_lap: evidence.wearPctPerLap,
       source: evidence.wearSource,
@@ -1369,8 +1576,17 @@ function strategyCompound(
     },
     max_stint_laps: maxLaps,
     projected_wear_at_max_pct: Math.round(evidence.wearPctPerLap * maxLaps * 10) / 10,
-    plannable: true,
-    not_plannable_reason: null
+    // A wear rate alone is enough to know a plan finishes; a pace model is what lets it be
+    // ranked on time. The page distinguishes them, so the fixture has to as well.
+    feasible: true,
+    plannable: pace !== null,
+    not_plannable_reason:
+      pace !== null
+        ? null
+        : `no pace model — no stint on it had ${MIN_FIT_LAPS} clean laps to fit a line ` +
+          'through, and no stint at this circuit ran long enough to calibrate lap time ' +
+          'against wear and lend it one. Usable in feasibility plans — how long a set ' +
+          'lasts is known — but those plans cannot be ranked on time'
   };
 }
 
@@ -1405,15 +1621,44 @@ function allocate(
   return laps;
 }
 
+/**
+ * `strategy.py::_allocate_by_wear`: with no pace to trade, laps go to whichever stint is
+ * least far through its own wear ceiling, so no set is pushed nearer the cliff than another.
+ */
+function allocateByWear(chain: StrategyCompound[], raceLaps: number): number[] | null {
+  const caps = chain.map((c) => c.max_stint_laps ?? 0);
+  const total = caps.reduce((a, b) => a + b, 0);
+  if (raceLaps < chain.length || total < raceLaps) return null;
+  const laps = chain.map(() => 1);
+  for (let handed = chain.length; handed < raceLaps; handed++) {
+    let best = -1;
+    let bestLoad = Infinity;
+    caps.forEach((cap, i) => {
+      if (laps[i]! >= cap) return;
+      const load = (laps[i]! + 1) / cap;
+      if (load < bestLoad) {
+        best = i;
+        bestLoad = load;
+      }
+    });
+    if (best < 0) return null;
+    laps[best]!++;
+  }
+  return laps;
+}
+
 function planFor(
   chain: StrategyCompound[],
-  raceLaps: number
+  raceLaps: number,
+  ranking: PlansRanking,
+  pitLossS: number
 ): StrategyPlan | null {
-  const laps = allocate(chain, raceLaps);
+  const timed = ranking === 'time';
+  const laps = timed ? allocate(chain, raceLaps) : allocateByWear(chain, raceLaps);
   if (!laps) return null;
 
   const stints: StrategyPlanStint[] = [];
-  let totalMs = PIT_LOSS_S * 1000 * (chain.length - 1);
+  let totalMs = pitLossS * 1000 * (chain.length - 1);
   let cursor = 1;
   chain.forEach((c, i) => {
     const n = laps[i]!;
@@ -1460,8 +1705,10 @@ function planFor(
     compounds: chain.map((c) => c.compound_visual),
     label: chain.map((c) => c.name).join(' → '),
     stints,
-    total_time_ms: Math.round(totalMs * 10) / 10,
-    delta_to_best_ms: 0,
+    // Null, not zero, when nothing measured a time: the page must show an em-dash rather
+    // than a number that would read as a projection.
+    total_time_ms: timed ? Math.round(totalMs * 10) / 10 : null,
+    delta_to_best_ms: timed ? 0 : null,
     pit_windows: windows,
     safety_car: flexible
       ? {
@@ -1499,55 +1746,111 @@ export function mockStrategy(
   const source = raceLaps === null ? `${race?.typeName} (session ${race?.id})` : 'request';
 
   const evidence = STRATEGY_EVIDENCE[trackId] ?? [];
+  const calibration = STRATEGY_CALIBRATION[trackId];
   const byCompound = new Map(evidence.map((e) => [e.compound, e]));
-  const compounds = [16, 17, 18].map((c) => strategyCompound(c, byCompound.get(c), laps));
-
-  const plannable = compounds.filter((c) => c.plannable);
-  const plans: StrategyPlan[] = [];
-  for (const stops of [1, 2]) {
-    const combos: StrategyCompound[][] = [[]];
-    for (let i = 0; i <= stops; i++) {
-      const next: StrategyCompound[][] = [];
-      for (const combo of combos) for (const c of plannable) next.push([...combo, c]);
-      combos.length = 0;
-      combos.push(...next);
-    }
-    for (const combo of combos) {
-      if (new Set(combo.map((c) => c.compound_visual)).size < 2) continue;
-      const plan = planFor(combo, laps);
-      if (plan) plans.push(plan);
-    }
-  }
-  plans.sort(
-    (a, b) =>
-      a.total_time_ms - b.total_time_ms ||
-      a.stops - b.stops ||
-      a.compounds.join().localeCompare(b.compounds.join())
+  const compounds = [16, 17, 18].map((c) =>
+    strategyCompound(c, byCompound.get(c), laps, calibration)
   );
-  const best = plans[0]?.total_time_ms ?? 0;
-  plans.forEach((plan, i) => {
-    plan.rank = i + 1;
-    plan.delta_to_best_ms = Math.round((plan.total_time_ms - best) * 10) / 10;
-  });
 
+  // A circuit with no recorded stop borrows a named constant and says so — the state the
+  // Bahrain fixture can never reach, and the one every practice-only weekend lands in.
+  const measuredPitLoss = sessions.some((s) => s.id === HEADLINE_SESSION_ID);
+  const pitLossS = measuredPitLoss ? PIT_LOSS_S : DEFAULT_PIT_LOSS_S;
+
+  const rank = (pool: StrategyCompound[], ranking: PlansRanking): StrategyPlan[] => {
+    const out: StrategyPlan[] = [];
+    for (const stops of [1, 2]) {
+      const combos: StrategyCompound[][] = [[]];
+      for (let i = 0; i <= stops; i++) {
+        const next: StrategyCompound[][] = [];
+        for (const combo of combos) for (const c of pool) next.push([...combo, c]);
+        combos.length = 0;
+        combos.push(...next);
+      }
+      for (const combo of combos) {
+        if (new Set(combo.map((c) => c.compound_visual)).size < 2) continue;
+        const plan = planFor(combo, laps, ranking, pitLossS);
+        if (plan) out.push(plan);
+      }
+    }
+    if (ranking === 'time') {
+      out.sort(
+        (a, b) =>
+          (a.total_time_ms ?? 0) - (b.total_time_ms ?? 0) ||
+          a.stops - b.stops ||
+          a.compounds.join().localeCompare(b.compounds.join())
+      );
+      const best = out[0]?.total_time_ms ?? 0;
+      out.forEach((plan, i) => {
+        plan.rank = i + 1;
+        plan.delta_to_best_ms = Math.round(((plan.total_time_ms ?? 0) - best) * 10) / 10;
+      });
+    } else {
+      // Fewest stops, then softer earlier — ascending on the compound sequence, since the
+      // visual numbers run 16 soft, 17 medium, 18 hard.
+      out.sort(
+        (a, b) => a.stops - b.stops || a.compounds.join().localeCompare(b.compounds.join())
+      );
+      out.forEach((plan, i) => {
+        plan.rank = i + 1;
+      });
+    }
+    return out;
+  };
+
+  // Time ranking first and kept whenever it produces anything: a projected time is strictly
+  // more information than a rule. Feasibility is the fallback, not the preference.
+  const plannable = compounds.filter((c) => c.plannable);
+  const feasible = compounds.filter((c) => c.feasible);
+  let plans: StrategyPlan[] = plannable.length >= 2 ? rank(plannable, 'time') : [];
+  let ranking: PlansRanking | null = plans.length > 0 ? 'time' : null;
+  if (plans.length === 0 && feasible.length >= 2 && feasible.length !== plannable.length) {
+    plans = rank(feasible, 'heuristic');
+    ranking = plans.length > 0 ? 'heuristic' : null;
+  }
+
+  const fuelSessionId = race?.id ?? sessions[0]?.id ?? HEADLINE_SESSION_ID;
   const sessionsUsed: StrategySessionUsed[] = sessions.map((s) => ({
     id: s.id,
     session_type: s.type,
     session_type_name: s.typeName,
-    evidence: s.type >= 10 ? 'race' : 'practice',
+    evidence: s.type >= 15 ? 'race' : 'practice',
     started_at_wall: BASE_WALL + s.startedOffset,
     contributed: evidence
       .filter((e) => e.sessionId === s.id)
-      .flatMap((e) => [`${e.name.toLowerCase()} pace`, `${e.name.toLowerCase()} wear`])
-      .concat(s.id === HEADLINE_SESSION_ID ? ['fuel burn', 'pit-lane loss'] : [])
+      .flatMap((e) => [
+        ...(e.fit ? [`${e.name.toLowerCase()} pace`] : []),
+        `${e.name.toLowerCase()} wear`
+      ])
+      // A derived slope is attributed to the stint the coefficient came from, since that is
+      // where the number in the degradation column was actually measured.
+      .concat(
+        calibration && calibration.sessionId === s.id
+          ? [
+              'wear-to-time calibration',
+              ...compounds
+                .filter((c) => c.pace?.source === 'derived')
+                .map((c) => `${c.name.toLowerCase()} pace`)
+            ]
+          : []
+      )
+      .concat(s.id === fuelSessionId ? ['fuel burn'] : [])
+      .concat(measuredPitLoss && s.id === HEADLINE_SESSION_ID ? ['pit-lane loss'] : [])
       .sort()
   }));
 
   const omitted: Record<string, string> = {};
   if (plans.length === 0) {
     omitted['plans'] =
-      'no legal plan: the two-compound rule needs two dry compounds with a model and this ' +
-      `weekend has ${plannable.length}.`;
+      'no legal plan: the two-compound rule needs two dry compounds with a measured wear ' +
+      `rate and this weekend has ${feasible.length}.`;
+  }
+  if (!calibration && compounds.some((c) => c.feasible && c.pace === null)) {
+    omitted['wear_calibration'] =
+      `no stint at this circuit ran ${MIN_FIT_LAPS} clean laps while wearing at least 2% of ` +
+      'a set, so there is no wear-to-time coefficient to lend the compounds that have a ' +
+      'wear rate and no fit of their own. One long run on any dry compound calibrates all ' +
+      'three.';
   }
 
   return {
@@ -1556,36 +1859,56 @@ export function mockStrategy(
     race_laps: laps,
     race_laps_source: source,
     wear_cliff_pct: WEAR_CLIFF_PCT,
+    wear_calibration: calibration
+      ? {
+          ...calibrationStint(calibration),
+          ms_per_wear_pct: calibration.msPerWearPct,
+          assumption: CALIBRATION_ASSUMPTION
+        }
+      : null,
     compounds,
     plans: plans.slice(0, MAX_PLANS),
     plans_considered: plans.length,
+    plans_ranking: ranking,
+    plans_ranking_note: ranking ? RANKING_NOTES[ranking] : null,
     fuel: {
       kg_per_lap: FUEL_KG_PER_LAP,
       laps_measured: 16,
       evidence: 'race',
-      session_ids: [HEADLINE_SESSION_ID],
+      session_ids: [fuelSessionId],
       race_laps: laps,
       margin_laps: FUEL_MARGIN_LAPS,
       slider_laps: Math.round((laps + FUEL_MARGIN_LAPS) * 100) / 100,
       recommended_kg: Math.round((laps + FUEL_MARGIN_LAPS) * FUEL_KG_PER_LAP * 100) / 100
     },
-    pit_loss_s: PIT_LOSS_S,
-    pit_loss: {
-      seconds: PIT_LOSS_S,
-      source: 'measured',
-      stops_measured: 1,
-      stops: [
-        {
-          session_id: HEADLINE_SESSION_ID,
-          stop_after_stint: 1,
-          laps: [PIT_IN_LAP, PIT_OUT_LAP],
-          loss_s: PIT_LOSS_S
+    pit_loss_s: pitLossS,
+    pit_loss: measuredPitLoss
+      ? {
+          seconds: PIT_LOSS_S,
+          source: 'measured',
+          stops_measured: 1,
+          stops: [
+            {
+              session_id: HEADLINE_SESSION_ID,
+              stop_after_stint: 1,
+              laps: [PIT_IN_LAP, PIT_OUT_LAP],
+              loss_s: PIT_LOSS_S
+            }
+          ],
+          detail:
+            'median of 1 stop(s) measured at this circuit, each as the pit lap’s excess over ' +
+            'the driver’s own clean-lap median in the same race'
         }
-      ],
-      detail:
-        'median of 1 stop(s) measured at this circuit, each as the pit lap’s excess over ' +
-        'the driver’s own clean-lap median in the same race'
-    },
+      : {
+          seconds: DEFAULT_PIT_LOSS_S,
+          source: 'default',
+          stops_measured: 0,
+          stops: [],
+          detail:
+            'no pit stop was recorded at this circuit this weekend, so a calendar-median ' +
+            `${DEFAULT_PIT_LOSS_S.toFixed(0)} s is assumed. Every plan’s stop count depends ` +
+            'on this number; drive a race with a stop in it and the sheet will measure it.'
+        },
     sessions_used: sessionsUsed,
     omitted
   };
