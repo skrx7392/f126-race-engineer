@@ -56,6 +56,11 @@ class Config:
     llm_model: str = field(default_factory=lambda: os.environ.get("F126_LLM_MODEL", ""))
     llm_api_key: str = field(default_factory=lambda: os.environ.get("F126_LLM_API_KEY", ""))
     llm_timeout_s: float = field(default_factory=lambda: _float("F126_LLM_TIMEOUT_S", 60.0))
+    #: Passed through as OpenAI `reasoning_effort` when non-empty ("none" disables a
+    #: reasoning model's thinking phase; empty sends nothing, for backends without it).
+    llm_reasoning_effort: str = field(
+        default_factory=lambda: os.environ.get("F126_LLM_REASONING_EFFORT", "")
+    )
     #: Grace period between a session closing and the debrief reading the database, so the
     #: batching writer has flushed the final classification and the last laps. The serve
     #: path also flushes the writer explicitly; this covers the case where there is none.

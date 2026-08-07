@@ -786,6 +786,25 @@ def test_the_request_carries_the_fact_sheet_and_nothing_else() -> None:
     assert json.loads(user["content"]) == fact_sheet
 
 
+def test_reasoning_effort_is_sent_only_when_configured() -> None:
+    """A reasoning model burns max_tokens thinking and returns an empty message; the
+    configured effort must reach the wire — and an unconfigured client must not send
+    the key at all, because not every backend accepts it."""
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=ok_response())
+
+    client = LlmClient("http://llm.test/v1", "m", reasoning_effort="none")
+    asyncio.run(client.chat(build_messages({}), transport=httpx.MockTransport(handler)))
+    assert seen["body"]["reasoning_effort"] == "none"
+
+    client = LlmClient("http://llm.test/v1", "m")
+    asyncio.run(client.chat(build_messages({}), transport=httpx.MockTransport(handler)))
+    assert "reasoning_effort" not in seen["body"]
+
+
 def test_no_authorization_header_when_no_key_is_configured() -> None:
     seen: dict[str, Any] = {}
 

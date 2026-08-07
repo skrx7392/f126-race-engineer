@@ -158,6 +158,7 @@ class LlmClient:
         *,
         api_key: str = "",
         timeout_s: float = 60.0,
+        reasoning_effort: str = "",
     ) -> None:
         if not base_url.strip():
             raise LlmError("no LLM base URL configured")
@@ -167,6 +168,7 @@ class LlmClient:
         self.model = model.strip()
         self._api_key = api_key.strip()
         self._timeout_s = float(timeout_s)
+        self._reasoning_effort = reasoning_effort.strip()
 
     @classmethod
     def from_config(cls, cfg: Config) -> LlmClient:
@@ -175,6 +177,7 @@ class LlmClient:
             cfg.llm_model,
             api_key=cfg.llm_api_key,
             timeout_s=cfg.llm_timeout_s,
+            reasoning_effort=cfg.llm_reasoning_effort,
         )
 
     def _headers(self) -> dict[str, str]:
@@ -201,6 +204,12 @@ class LlmClient:
             "max_tokens": MAX_TOKENS,
             "stream": False,
         }
+        # A reasoning model spends the whole max_tokens budget thinking and returns an
+        # empty message (finish_reason "length", gemma4:e4b on Ollama does exactly this).
+        # Sent only when configured, because a backend that doesn't know the parameter
+        # may reject the request outright.
+        if self._reasoning_effort:
+            body["reasoning_effort"] = self._reasoning_effort
         url = _chat_url(self.base_url)
         last: Exception | None = None
 
